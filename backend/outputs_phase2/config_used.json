@@ -1,0 +1,13 @@
+{
+  "horizon": 500,
+  "seeds": 6,
+  "n_mc_urlcc": 64,
+  "load_scales": [
+    0.8,
+    1.0,
+    1.2,
+    1.4,
+    1.6
+  ],
+  "out_dir": "outputs_phase2"
+}

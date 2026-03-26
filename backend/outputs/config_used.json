@@ -1,0 +1,12 @@
+{
+  "horizon": 300,
+  "seeds": 5,
+  "load_scales": [
+    0.8,
+    1.0,
+    1.2,
+    1.4,
+    1.6
+  ],
+  "out_dir": "outputs"
+}
