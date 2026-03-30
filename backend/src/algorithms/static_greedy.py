@@ -138,7 +138,8 @@ class StaticGreedyAllocator(BaseAllocator):
         return int(sorted(list(map(int, viol)), key=lambda x: rank.get(x, 10_000))[0])
 
     def _repair_radio(self, s_target: int, b: np.ndarray, sinr: np.ndarray) -> bool:
-        k_idx = int(np.argmin(sinr[s_target]))
+        # To reduce radio delay we should add PRBs on the strongest link, not the weakest.
+        k_idx = int(np.argmax(sinr[s_target]))
         donors = [r for r in range(self.s) if r != s_target and b[r, k_idx] >= 1.0]
         if not donors:
             return False

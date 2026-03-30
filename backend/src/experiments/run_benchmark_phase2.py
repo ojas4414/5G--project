@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import List
+from typing import Any, Callable, List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -68,15 +68,46 @@ class ExpConfig:
     seeds: int = 6
     n_mc_urlcc: int = 64
     load_scales: tuple[float, ...] = (0.8, 1.0, 1.2, 1.4, 1.6)
+    num_slices: int = 3
     out_dir: str = "outputs_phase2"
 
 
-def build_slice_configs(load_scale: float) -> List[SliceConfig]:
-    return [
+def build_slice_configs(load_scale: float, num_slices: int = 3) -> List[SliceConfig]:
+    base = [
         SliceConfig("eMBB", r_min=45e6, d_max=0.028, alpha=1.2, beta=0.8, gamma=0.6, omega=95.0 * load_scale),
         SliceConfig("URLLC", r_min=15e6, d_max=0.008, alpha=1.0, beta=1.5, gamma=1.8, omega=65.0 * load_scale, eps_urlcc=0.01),
         SliceConfig("mMTC", r_min=6e6, d_max=0.050, alpha=0.9, beta=0.7, gamma=0.4, omega=50.0 * load_scale),
     ]
+    if num_slices <= 3:
+        return base[:num_slices]
+
+    extra = []
+    for idx in range(num_slices - 3):
+        extra.append(
+            SliceConfig(
+                name=f"mMTC_{idx + 2}",
+                r_min=5e6,
+                d_max=0.060,
+                alpha=0.85,
+                beta=0.65,
+                gamma=0.35,
+                omega=48.0 * load_scale,
+            )
+        )
+    return base + extra
+
+
+def static_slice_weights(num_slices: int) -> np.ndarray:
+    if num_slices <= 0:
+        return np.array([], dtype=float)
+    if num_slices == 1:
+        return np.array([1.0], dtype=float)
+    if num_slices == 2:
+        return np.array([0.56, 0.44], dtype=float)
+    # Keep eMBB/URLLC emphasis and distribute the rest across mMTC-like slices.
+    tail = np.full(num_slices - 2, 0.20 / max(num_slices - 2, 1), dtype=float)
+    w = np.concatenate([np.array([0.45, 0.35], dtype=float), tail])
+    return w / np.sum(w)
 
 
 def generate_common_traces(s: int, k: int, horizon: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
@@ -98,7 +129,7 @@ def make_algorithm(name: str, env: FiveGEnvironment):
     if name == "C_ADMM":
         return CADMMAllocator(s, k, m, env.b_k, env.c_m, env.t_agg)
     if name == "Static_Greedy":
-        return StaticGreedyAllocator(np.array([0.45, 0.35, 0.2]), s, k, m, env.b_k, env.c_m, env.t_agg, r_min=r_min, d_max=d_max, omega=omega)
+        return StaticGreedyAllocator(static_slice_weights(s), s, k, m, env.b_k, env.c_m, env.t_agg, r_min=r_min, d_max=d_max, omega=omega)
     if name == "OMD_BF":
         return OMDBanditAllocator(s, k, m, env.b_k, env.c_m, env.t_agg, d_max=d_max)
     raise ValueError(f"Unknown algorithm: {name}")
@@ -120,6 +151,9 @@ def _safe_series_mean(arr: np.ndarray | None) -> float:
 
 
 def _extract_price_info(alg, k: int, m: int) -> tuple[float, float, float, float]:
+    if hasattr(alg, "use_prices") and not bool(getattr(alg, "use_prices")):
+        # Independent MAPPO has no market/pricing mechanism; report as missing, not zero.
+        return np.nan, np.nan, np.nan, np.nan
     if hasattr(alg, "prices"):
         p = np.asarray(getattr(alg, "prices"), dtype=float)
         if p.size >= k + m + 1:
@@ -191,11 +225,16 @@ def run_one(name: str, alg, env: FiveGEnvironment, horizon: int, n_mc_urlcc: int
     return pd.DataFrame(rows)
 
 
-def run_experiment(cfg: ExpConfig) -> pd.DataFrame:
+def run_experiment(
+    cfg: ExpConfig,
+    progress_callback: Callable[[int, int, dict[str, Any]], None] | None = None,
+) -> pd.DataFrame:
     frames = []
+    total_runs = cfg.seeds * len(cfg.load_scales) * len(ALGORITHM_ORDER)
+    completed_runs = 0
     for seed in range(cfg.seeds):
         for load_scale in cfg.load_scales:
-            slice_cfgs = build_slice_configs(load_scale)
+            slice_cfgs = build_slice_configs(load_scale, num_slices=cfg.num_slices)
             scenario_seed = 1000 + 97 * seed + int(round(100 * load_scale))
             lambda_trace, channel_trace = generate_common_traces(s=len(slice_cfgs), k=3, horizon=cfg.horizon, seed=scenario_seed)
 
@@ -220,6 +259,13 @@ def run_experiment(cfg: ExpConfig) -> pd.DataFrame:
                 df["seed"] = seed
                 df["load_scale"] = load_scale
                 frames.append(df)
+                completed_runs += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        completed_runs,
+                        total_runs,
+                        {"seed": seed, "load_scale": load_scale, "algorithm": alg_name},
+                    )
     return pd.concat(frames, ignore_index=True)
 
 
