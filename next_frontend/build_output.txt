@@ -1,0 +1,18 @@
+  ▲ Next.js 14.2.35
+
+   Creating an optimized production build ...
+Failed to compile.
+
+./node_modules/three-mesh-bvh/src/utils/ExtensionUtilities.js
+Attempted import error: 'BatchedMesh' is not exported from 'three' (imported as 'THREE').
+
+Import trace for requested module:
+./node_modules/three-mesh-bvh/src/utils/ExtensionUtilities.js
+./node_modules/three-mesh-bvh/src/index.js
+./node_modules/@react-three/drei/core/Bvh.js
+./node_modules/@react-three/drei/index.js
+./src/components/NetworkSliceCanvas.tsx
+./src/app/page.tsx
+
+
+> Build failed because of webpack errors
