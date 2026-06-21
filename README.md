@@ -122,7 +122,7 @@ python -c "import numpy, pandas, matplotlib, torch, scipy, fastapi; print('✅ A
 ### 1.5 — Start the Backend API Server
 
 ```powershell
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+python main.py
 ```
 
 You should see output like:
@@ -349,7 +349,7 @@ netstat -ano | findstr :8000
 taskkill /PID 12345 /F
 ```
 
-Then restart: `uvicorn main:app --host 0.0.0.0 --port 8000 --reload`
+Then restart: `python main.py`
 
 ---
 
@@ -432,7 +432,7 @@ cd C:\Users\Ojas\Desktop\5G-project\backend
 pip install -r requirements.txt
 
 # Start the API server
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+python main.py
 
 # ─── ALTERNATIVELY: run experiments directly ──────────────
 
@@ -477,7 +477,7 @@ http://localhost:8000/docs
 cd backend                        cd next_frontend
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt   npm install
-uvicorn main:app ...    →         npm run dev        →        http://localhost:3000
+python main.py          →         npm run dev        →        http://localhost:3000
 [API running]           →         [Site running]     →        Click "Run Full Research"
 [Benchmark running...]                               ←        [Progress bar updates]
 [Done → plots saved]              ←                 ←        [Plot gallery opens]
