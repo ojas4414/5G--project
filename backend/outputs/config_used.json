@@ -1,6 +1,6 @@
 {
-  "horizon": 300,
-  "seeds": 5,
+  "horizon": 200,
+  "seeds": 3,
   "load_scales": [
     0.8,
     1.0,
@@ -8,5 +8,7 @@
     1.4,
     1.6
   ],
+  "num_slices": 3,
+  "n_mc_urlcc": 16,
   "out_dir": "outputs"
 }

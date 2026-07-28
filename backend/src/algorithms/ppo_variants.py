@@ -11,6 +11,12 @@ import torch.optim as optim
 from src.algorithms.base import AlgorithmOutput, BaseAllocator
 
 
+def _softplus(x: np.ndarray | float) -> np.ndarray | float:
+    """Numerically stable softplus, keeping resource shares strictly positive."""
+    x = np.asarray(x, dtype=float)
+    return np.logaddexp(0.0, x) + 1e-6
+
+
 class Actor(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, hidden: int = 128):
         super().__init__()
@@ -132,17 +138,25 @@ class _BasePPO(BaseAllocator):
             logp = dist.log_prob(z).sum(dim=1)
             a = z.squeeze(0).detach().numpy()
 
-            raw_b = np.maximum(0.0, a[: self.k]) + 1e-6
-            raw_c = np.maximum(0.0, a[self.k : self.k + self.m]) + 1e-6
-            raw_tau = max(0.0, float(a[self.k + self.m])) + 1e-6
+            # Softplus rather than max(0, .): with a rectifier any negative sample
+            # collapses to ~1e-6, so a slice can be handed essentially zero transport or
+            # radio and drop into an unstable queue purely from exploration noise.
+            # Softplus keeps every share strictly positive and smoothly differentiable.
+            raw_b = _softplus(a[: self.k])
+            raw_c = _softplus(a[self.k : self.k + self.m])
+            raw_tau = float(_softplus(a[self.k + self.m]))
             x_logits = a[self.k + self.m + 1 :]
             m_idx = int(np.argmax(x_logits))
             x[i, m_idx] = 1
 
             b_share = raw_b / np.maximum(np.sum(raw_b), 1e-9)
             b[i] = b_share * (np.sum(self.b_k) / self.s)
-            c_amt = (raw_c[m_idx] / np.maximum(np.sum(raw_c), 1e-9)) * (np.sum(self.c_m) / self.s)
-            c[i, m_idx] = max(c_amt, 1e-3)
+            # MEC association is exclusive (one-hot x), so the slice bids for the whole
+            # host and the environment's capacity projection arbitrates between slices
+            # that picked the same one. Bidding for only 1/m of a host it may have to
+            # itself would idle compute for no reason -- the real decision here is
+            # *which* MEC, and MAAN's price term is what discourages over-bidding.
+            c[i, m_idx] = self.c_m[m_idx]
             tau_raw[i] = raw_tau
 
             info["logp"].append(float(logp.item()))

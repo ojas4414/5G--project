@@ -1,7 +1,20 @@
-numpy
-pandas
-matplotlib
-torch
-scipy
-fastapi
-uvicorn
+# CPU-only PyTorch. The default PyPI `torch` wheel bundles the CUDA runtime (~2.5 GB
+# with its nvidia-* dependencies), which is dead weight on any CPU host and will not fit
+# a free-tier build. This index serves the CPU builds instead (~500 MB installed).
+# It must stay an --extra-index-url, not --index-url, or the other packages below become
+# unresolvable.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.9.1+cpu
+
+# Every version is pinned: an unpinned resolve on a fresh build box is how this project
+# picked up matplotlib 3.11, which removed the `boxplot(labels=)` argument the plotting
+# code used and broke the research run at 90% completion.
+numpy==2.1.3
+pandas==2.2.3
+matplotlib==3.9.2
+scipy==1.14.1
+
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.10.3

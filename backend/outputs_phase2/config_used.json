@@ -9,5 +9,6 @@
     1.4,
     1.6
   ],
+  "num_slices": 3,
   "out_dir": "outputs_phase2"
 }

@@ -13,7 +13,46 @@ A full-stack research platform that **benchmarks 5G network slicing algorithms**
 └── frontend/         ← Legacy Vite prototype (not needed)
 ```
 
-The **backend** runs algorithms and serves data. The **next_frontend** is the website that visualises everything. They talk to each other over HTTP on your local machine.
+The **backend** runs algorithms and serves data. The **next_frontend** is the website that visualises everything. They talk to each other over HTTP — locally, or across two deployed services.
+
+> **Deploying?** Jump to [PART 6 — Deploying to Render](#-part-6--deploying-to-render). The repo ships a `render.yaml` blueprint.
+
+---
+
+## 🔬 The Model, in Brief
+
+Each slice is served by three queues in series — radio, transport, and compute — and every
+quantity carries an explicit unit:
+
+| Symbol | Unit | Meaning |
+|--------|------|---------|
+| `λ_s` | bit/s | offered traffic of slice *s* |
+| `b_{s,k}` | PRB | resource blocks of gNB *k* given to slice *s* |
+| `R_s` | bit/s | achieved radio rate, `Σ_k b_{s,k} · W_prb · log₂(1+SINR)` |
+| `τ_s` | bit/s | transport capacity given to slice *s* |
+| `c_{s,m}` | cycle/s | MEC compute given to slice *s* on host *m* |
+| `ω_s` | cycle/bit | processing density of slice *s* |
+| `L` | bit | mean packet size (12 000 bit = 1500 B) |
+
+Each domain is an M/M/1 queue, so its mean sojourn time is
+
+```
+W = L / (μ − λ)        [s]
+```
+
+with `μ = R_s` for radio, `τ_s` for transport, and `c_s/ω_s` for compute. End-to-end delay
+is `d_radio + d_trans + d_comp`, and a slice meets its SLA when `R_s ≥ r_min` **and**
+`D_s ≤ d_max`. Unstable queues (`μ ≤ λ`) saturate at 1 s rather than diverging.
+
+Utility is proportional-fair with a bounded delay cost:
+
+```
+u_s = α_s·log(1 + R_s/r_min_s) − β_s·min(D_s/d_max_s, 3) − γ_s·σ(20·(D_s/d_max_s − 1))
+```
+
+The log rate term prevents the degenerate solution (hand every PRB to one slice) that a
+linear term produces; the cap on the delay term keeps utility O(1) instead of letting a
+saturated queue against an 8 ms budget swamp everything else.
 
 ---
 
@@ -21,7 +60,7 @@ The **backend** runs algorithms and serves data. The **next_frontend** is the we
 
 | Tool | Version | Check Command |
 |------|---------|--------------|
-| Python | 3.10 or newer | `python --version` |
+| Python | 3.12 recommended (3.10+ works) | `python --version` |
 | Node.js | 18 or newer | `node --version` |
 | npm | 9 or newer | `npm --version` |
 | pip | any | `pip --version` |
@@ -39,7 +78,7 @@ The **backend** runs algorithms and serves data. The **next_frontend** is the we
 ### 1.1 — Open a terminal in the backend folder
 
 ```powershell
-cd C:\Users\Ojas\Desktop\5G-project\backend
+cd <path-to-repo>\backend
 ```
 
 ---
@@ -81,7 +120,7 @@ source .venv/bin/activate
 
 ✅ **Success indicator:** Your prompt will now show `(.venv)` at the beginning, like:
 ```
-(.venv) PS C:\Users\Ojas\Desktop\5G-project\backend>
+(.venv) PS <path-to-repo>\backend>
 ```
 
 ---
@@ -104,13 +143,15 @@ This installs:
 | `fastapi` | REST API that the frontend connects to |
 | `uvicorn` | Web server that runs FastAPI |
 
-> ⚠️ `torch` (PyTorch) is the largest download (~200–800 MB). This is normal.
+> ℹ️ `requirements.txt` pulls the **CPU-only** PyTorch build via an `--extra-index-url`,
+> and pins every version. Both matter:
+> - The default PyPI `torch` bundles the CUDA runtime (~2.5 GB with its `nvidia-*` deps),
+>   which is dead weight on any machine without an NVIDIA GPU. The CPU build is ~500 MB.
+> - Unpinned versions is how this project silently picked up matplotlib 3.11, which
+>   removed the `boxplot(labels=)` argument the plotting code used — the research run
+>   completed the whole benchmark and then died at 90%.
 >
-> If the install fails with a torch error, try:
-> ```powershell
-> pip install torch --index-url https://download.pytorch.org/whl/cpu
-> pip install -r requirements.txt
-> ```
+> Expect ~890 MB installed and a few minutes on a first install.
 
 **Verify everything installed correctly:**
 ```powershell
@@ -138,7 +179,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 **Verify it's working** — open a browser or run:
 ```powershell
 curl http://localhost:8000/api/health
-# Should return: {"status":"ok"}
+# {"status":"ok","service":"5g-slicing-benchmark","results_available":true,"research_running":false}
 ```
 
 > 💡 **Interactive API docs** are available at: `http://localhost:8000/docs`
@@ -154,7 +195,7 @@ curl http://localhost:8000/api/health
 ### 2.1 — Open a new terminal in the frontend folder
 
 ```powershell
-cd C:\Users\Ojas\Desktop\5G-project\next_frontend
+cd <path-to-repo>\next_frontend
 ```
 
 ---
@@ -274,10 +315,47 @@ python -m src.experiments.run_benchmark_phase2
 | Algorithm | What it does | Role |
 |-----------|-------------|------|
 | **MAAN_PPO** | Neural network agent trained with PPO. Uses dual price signals to learn resource allocation. | Main algorithm under test |
-| **Ind. MAPPO_PPO** | Separate PPO agent per slice, no coordination or price signals | Decentralised baseline |
-| **C_ADMM** | Consensus ADMM — splits the problem across slices and iterates toward a shared feasible solution | Distributed optimiser |
-| **Static Greedy** | Fixed proportional rules that never adapt to network conditions | Baseline floor |
-| **OMD Bandit** | Online Mirror Descent with bandit-style gradient estimation. No neural networks. | Black-box baseline |
+| **Ind. MAPPO_PPO** | Separate PPO agent per slice, no coordination or price signals | Ablation of the price mechanism |
+| **C_ADMM** | Consensus ADMM. Per-slice primal steps use closed-form gradients of the same utility the environment scores, then project onto the shared capacity constraints. | Distributed optimiser |
+| **Static Greedy** | Fixed proportional rules plus a greedy QoS repair loop; does not learn | Baseline floor |
+| **OGD_Bandit** | Projected online gradient ascent with one-point bandit feedback. No neural networks. | Black-box baseline |
+
+> **Naming note:** this baseline was previously called `OMD_BF` ("Online Mirror Descent").
+> The implementation uses a Euclidean projection with no Bregman divergence or mirror map,
+> so it is online *gradient* descent with bandit feedback, not mirror descent. Renamed to
+> match what the code does.
+
+### What the current results actually show
+
+From the committed run (6 seeds × 5 loads × horizon 500, paired *t*-tests with
+Holm-Bonferroni correction — see `outputs_phase2/statistical_significance.csv`):
+
+QoS success ratio, lowest load → highest load:
+
+| Algorithm | 0.8 → 1.6 |
+|---|---|
+| C_ADMM | 0.758 → 0.635 |
+| MAAN_PPO | 0.642 → 0.557 |
+| Independent_MAPPO_PPO | 0.635 → 0.552 |
+| Static_Greedy | 0.487 → 0.262 |
+| OGD_Bandit | 0.350 → 0.310 |
+
+* All five algorithms degrade monotonically as offered load rises, as expected.
+* **C_ADMM leads** on both QoS success and utility, and beats MAAN_PPO significantly at
+  **all 5** load points (adjusted *p* ≤ 0.0003; utility margin +0.26 to +0.38). Having
+  exact gradients of the scored objective is a real advantage over learning it online.
+* **MAAN_PPO shows no significant advantage over the Independent MAPPO ablation** at any
+  load (adjusted *p* between 0.79 and 1.00; utility differences within +0.05). On this
+  benchmark the dual-price coordination mechanism is **not** demonstrably helping. That
+  is a negative result, and it is reported rather than tuned away.
+* Both PPO variants clearly beat Static_Greedy and OGD_Bandit at every load
+  (adjusted *p* ≤ 0.0014).
+
+> These conclusions differ from earlier versions of this README, which described MAAN_PPO
+> as the winner. Those numbers came from a delay model whose units did not cancel: QoS
+> success was identically 0.000 and URLLC violation probability identically 1.000 for
+> every algorithm at every load, so nothing was actually being compared. See
+> [The Model, in Brief](#-the-model-in-brief) for the corrected formulation.
 
 ---
 
@@ -316,13 +394,88 @@ Controlled by `ExpConfig` in `backend/src/experiments/run_benchmark_phase2.py`:
 | `n_mc_urlcc` | 64 | SAA samples for URLLC chance-constraint. Reduce to 16 for speed. |
 | `num_slices` | 3 | Number of network slices (eMBB + URLLC + mMTC). |
 
+The **"Run Full Research" button does not use these defaults.** It posts a much smaller
+job (2 seeds, 3 loads, horizon 120) sized to finish in a few minutes on a small shared-CPU
+instance; the accepted ranges are enforced by `ResearchRunRequest` in `backend/main.py`.
+`PLOT_DPI` (default 140) can be lowered further to cut memory during plotting.
+
 ### Frontend — Backend URL
 
-By default the frontend connects to `http://localhost:8000`. To change this, create a `.env.local` file in `next_frontend/`:
+Copy `next_frontend/.env.example` to `.env.local` and set:
 
 ```env
-NEXT_PUBLIC_BACKEND_URL=http://your-backend-host:8000
+NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
 ```
+
+> ⚠️ `NEXT_PUBLIC_*` values are **inlined into the JavaScript bundle at build time**, not
+> read at runtime. Changing this on a deployed service requires a **rebuild**, not just a
+> restart.
+
+---
+
+## 🚀 PART 6 — Deploying to Render
+
+The two halves run as **two separate Render Web Services** — different runtimes, different
+build commands. They cannot share one service. A `render.yaml` blueprint at the repo root
+defines both.
+
+### Option A — Blueprint (recommended)
+
+1. Render Dashboard → **New** → **Blueprint** → select this repo.
+2. Render reads `render.yaml` and proposes two services.
+3. It will prompt for `NEXT_PUBLIC_BACKEND_URL`. You don't know the backend URL yet, so
+   put anything, deploy, then come back to step 5.
+4. Wait for **`aether-5g-backend`** to go live and copy its URL
+   (e.g. `https://aether-5g-backend.onrender.com`).
+5. Set `NEXT_PUBLIC_BACKEND_URL` on the **frontend** service to that URL (no trailing
+   slash) and **Manual Deploy → Clear build cache & deploy**. The rebuild is required —
+   see the warning above.
+
+### Option B — Two services by hand
+
+**Backend** — New → Web Service:
+
+| Field | Value |
+|-------|-------|
+| Root Directory | `backend` |
+| Runtime | Python 3 |
+| Build Command | `pip install --upgrade pip && pip install -r requirements.txt` |
+| Start Command | `uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1` |
+| Health Check Path | `/api/health` |
+| Env: `PYTHON_VERSION` | `3.12.7` |
+| Env: `OMP_NUM_THREADS` | `1` |
+
+**Frontend** — New → Web Service:
+
+| Field | Value |
+|-------|-------|
+| Root Directory | `next_frontend` |
+| Runtime | Node |
+| Build Command | `npm ci && npm run build` |
+| Start Command | `npm run start -- --port $PORT` |
+| Env: `NODE_VERSION` | `20.18.0` |
+| Env: `NEXT_PUBLIC_BACKEND_URL` | the backend's URL |
+
+### Verifying the deploy
+
+```bash
+curl https://<your-backend>.onrender.com/api/health
+# {"status":"ok","service":"5g-slicing-benchmark","results_available":true,"research_running":false}
+```
+
+Then open the frontend URL. It starts in **Simulation Mode**, which needs no backend at
+all — so the page rendering is *not* proof the backend is reachable. Click **Result
+Plots**: if charts appear, the frontend is genuinely talking to the backend.
+
+### Free-tier constraints worth knowing
+
+| Constraint | Consequence |
+|------------|-------------|
+| **512 MB RAM** | Importing torch + pandas + scipy + matplotlib costs ~305 MB before serving a request. A benchmark run peaks near **415 MB**. Do not raise the run parameters much, and do not add a second worker. |
+| **Ephemeral disk** | Anything written at runtime — new CSVs, new plots — is lost on restart, redeploy, or sleep/wake. The repo therefore **commits** a pre-generated result set so a cold instance has something to serve immediately. |
+| **Sleeps after ~15 min idle** | First request after sleep takes ~30–60 s. A research run in progress is killed; on wake the job is reported as `failed` with "Server restarted while this run was in progress" rather than leaving the progress bar spinning forever. |
+| **Shared CPU** | The benchmark is single-threaded. A run that takes ~25 s locally can take several minutes there. |
+| **CORS** | `allow_origins=["*"]` — deliberately open so any frontend origin works. |
 
 ---
 
@@ -356,7 +509,7 @@ Then restart: `python main.py`
 ### Frontend can't connect to backend (fetch errors in browser console)
 
 1. Make sure the backend is actually running — check Terminal 1
-2. Visit `http://localhost:8000/api/health` in your browser — should show `{"status":"ok"}`
+2. Visit `http://localhost:8000/api/health` in your browser — the `status` field should be `"ok"`
 3. Make sure both are on the same machine (backend on 8000, frontend on 3000)
 4. The backend has CORS fully open (`allow_origins=["*"]`), so CORS is not the issue
 
@@ -375,7 +528,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 You're running the Python command from the wrong folder. Must be inside `backend/`:
 ```powershell
-cd C:\Users\Ojas\Desktop\5G-project\backend
+cd <path-to-repo>\backend
 python -m src.experiments.run_benchmark_phase2
 ```
 
@@ -415,6 +568,9 @@ cfg = ExpConfig(
 )
 ```
 
+Total work scales as `seeds × len(load_scales) × 5 algorithms × horizon`, so halving the
+seeds and dropping two loads is roughly a 3× saving.
+
 ---
 
 ## ⚡ Quick Reference — All Commands
@@ -423,7 +579,7 @@ cfg = ExpConfig(
 # ─── BACKEND (Terminal 1) ─────────────────────────────────
 
 # Navigate to backend
-cd C:\Users\Ojas\Desktop\5G-project\backend
+cd <path-to-repo>\backend
 
 # Activate virtual environment (Windows PowerShell)
 .\.venv\Scripts\Activate.ps1
@@ -446,7 +602,7 @@ python -m src.experiments.run_benchmark_phase2
 # ─── FRONTEND (Terminal 2) ────────────────────────────────
 
 # Navigate to frontend
-cd C:\Users\Ojas\Desktop\5G-project\next_frontend
+cd <path-to-repo>\next_frontend
 
 # Install packages (first time only)
 npm install
@@ -485,4 +641,4 @@ python main.py          →         npm run dev        →        http://localho
 
 ---
 
-*Stack: Python 3.10+ · FastAPI · Uvicorn · Next.js 14 · Three.js · React Three Fiber · Framer Motion · PyTorch · TailwindCSS*
+*Stack: Python 3.12 · FastAPI · Uvicorn · Next.js 14 · Three.js · React Three Fiber · Framer Motion · PyTorch · TailwindCSS*

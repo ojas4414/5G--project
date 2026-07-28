@@ -1,3 +1,12 @@
+"""LEGACY -- superseded by ``ppo_variants.MAANPPOAllocator``.
+
+This is the pre-neural heuristic prototype of MAAN. It is kept for reference only: it is
+not in ``ALGORITHM_ORDER``, is not exercised by either benchmark, and its allocation
+magnitudes (``max(1.0, ...)`` floors, hand-tuned 0.6 factors) were calibrated against the
+old unit-less resource scales. It has NOT been recalibrated for the physical units the
+environment now uses, so its numbers are not comparable to the benchmarked algorithms.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

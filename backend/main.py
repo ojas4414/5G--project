@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import traceback
@@ -41,21 +42,75 @@ RESEARCH_LOCK = threading.Lock()
 RESEARCH_JOBS: dict[str, dict] = {}
 LATEST_RESEARCH_JOB_ID: str | None = None
 
+# Job state is mirrored to disk. The in-memory dict alone is not enough: a free-tier
+# instance sleeps after idling and loses the process, after which the dashboard would poll
+# a job_id that 404s forever with no way to recover. Persisting lets a woken instance
+# report the last known outcome instead.
+JOBS_FILE = PHASE2_DIR / "research_jobs.json"
+MAX_PERSISTED_JOBS = 20
+
 
 class ResearchRunRequest(BaseModel):
-    num_slices: int = Field(default=3, ge=3, le=12)
+    """Bounds are deliberately tight -- see DEMO_* defaults for the reasoning."""
+
+    num_slices: int = Field(default=3, ge=3, le=6)
     load_center: float = Field(default=1.0, ge=0.6, le=2.0)
-    seeds: int = Field(default=4, ge=1, le=10)
-    horizon: int = Field(default=300, ge=50, le=1500)
-    n_mc_urlcc: int = Field(default=32, ge=4, le=256)
+    seeds: int = Field(default=2, ge=1, le=6)
+    horizon: int = Field(default=120, ge=50, le=600)
+    n_mc_urlcc: int = Field(default=24, ge=4, le=128)
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _load_jobs_from_disk() -> None:
+    """Restore job history written by a previous process (best effort)."""
+    global LATEST_RESEARCH_JOB_ID
+    if not JOBS_FILE.exists():
+        return
+    try:
+        with open(JOBS_FILE, encoding="utf-8") as fp:
+            payload = json.load(fp)
+        jobs = payload.get("jobs", {})
+        if not isinstance(jobs, dict):
+            return
+        for job in jobs.values():
+            # A job still marked "running" cannot be running: its thread died with the
+            # previous process. Report it honestly instead of leaving the UI spinning.
+            if job.get("status") == "running":
+                job["status"] = "failed"
+                job["message"] = "Server restarted while this run was in progress."
+                job["finished_at"] = job.get("finished_at") or _utc_now_iso()
+        RESEARCH_JOBS.update(jobs)
+        LATEST_RESEARCH_JOB_ID = payload.get("latest_job_id") or LATEST_RESEARCH_JOB_ID
+    except (OSError, json.JSONDecodeError, AttributeError):
+        # Corrupt or unreadable history must never stop the API from booting.
+        pass
+
+
+def _persist_jobs_locked() -> None:
+    """Write job history to disk. Caller must hold RESEARCH_LOCK."""
+    try:
+        recent = sorted(RESEARCH_JOBS.values(), key=lambda j: j.get("started_at") or "", reverse=True)
+        trimmed = {job["job_id"]: job for job in recent[:MAX_PERSISTED_JOBS]}
+        tmp = JOBS_FILE.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as fp:
+            json.dump({"jobs": trimmed, "latest_job_id": LATEST_RESEARCH_JOB_ID}, fp, indent=2)
+        tmp.replace(JOBS_FILE)
+    except OSError:
+        # Persistence is a convenience; losing it must not fail the run.
+        pass
+
+
 def _centered_load_scales(load_center: float) -> tuple[float, ...]:
-    offsets = (-0.4, -0.2, 0.0, 0.2, 0.4)
+    """Load sweep for a demo run.
+
+    Three points rather than five: the total work is
+    ``seeds * len(load_scales) * 5 algorithms * horizon`` steps, so dropping two loads cuts
+    the run by 40%. Three points are still enough to show a trend against load.
+    """
+    offsets = (-0.3, 0.0, 0.3)
     vals = sorted({round(min(2.0, max(0.6, load_center + o)), 2) for o in offsets})
     return tuple(vals)
 
@@ -72,10 +127,14 @@ def _list_png_files(folder: Path, url_prefix: str) -> list[dict]:
     return [{"name": f.name, "title": _pretty_plot_title(f), "url": f"{url_prefix}/{f.name}"} for f in files]
 
 
-def _update_job(job_id: str, **updates) -> None:
+def _update_job(job_id: str, *, persist: bool = False, **updates) -> None:
     with RESEARCH_LOCK:
         if job_id in RESEARCH_JOBS:
             RESEARCH_JOBS[job_id].update(updates)
+            # Progress ticks stay in memory; only terminal transitions hit the disk, so a
+            # long run does not rewrite the file on every one of its steps.
+            if persist:
+                _persist_jobs_locked()
 
 
 def _run_research_job(job_id: str, req_data: dict) -> None:
@@ -112,6 +171,7 @@ def _run_research_job(job_id: str, req_data: dict) -> None:
 
         _update_job(
             job_id,
+            persist=True,
             status="completed",
             progress=1.0,
             message="Full research run completed.",
@@ -120,6 +180,7 @@ def _run_research_job(job_id: str, req_data: dict) -> None:
     except Exception as exc:
         _update_job(
             job_id,
+            persist=True,
             status="failed",
             message=f"Research run failed: {exc}",
             error=traceback.format_exc(limit=8),
@@ -129,7 +190,17 @@ def _run_research_job(job_id: str, req_data: dict) -> None:
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok"}
+    """Liveness probe. The `status` field is the contract -- keep it exactly "ok"."""
+    with RESEARCH_LOCK:
+        running = any(j.get("status") == "running" for j in RESEARCH_JOBS.values())
+    return {
+        "status": "ok",
+        "service": "5g-slicing-benchmark",
+        "results_available": (PHASE2_DIR / "summary_with_ci95.csv").exists()
+        or (PHASE2_DIR / "benchmark_results_phase2.csv").exists()
+        or (PHASE1_DIR / "benchmark_results.csv").exists(),
+        "research_running": running,
+    }
 
 
 @app.get("/api/results")
@@ -190,6 +261,7 @@ def start_research_run(req: ResearchRunRequest):
         }
         RESEARCH_JOBS[job_id] = job
         LATEST_RESEARCH_JOB_ID = job_id
+        _persist_jobs_locked()
 
     worker = threading.Thread(target=_run_research_job, args=(job_id, req_data), daemon=True)
     worker.start()
@@ -216,8 +288,15 @@ def get_research_status(job_id: str):
 app.mount("/artifacts_phase2", StaticFiles(directory=PHASE2_DIR), name="artifacts_phase2")
 app.mount("/artifacts_phase1", StaticFiles(directory=PHASE1_DIR), name="artifacts_phase1")
 
+_load_jobs_from_disk()
+
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # Render (and most PaaS hosts) inject the port to bind; hardcoding 8000 makes the
+    # service unreachable there. Reload is a local-development convenience only -- it
+    # forks a watcher process, which is wasteful on a 512 MB instance.
+    port = int(os.environ.get("PORT", "8000"))
+    reload = os.environ.get("DEV_RELOAD", "").lower() in {"1", "true", "yes"}
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=reload)

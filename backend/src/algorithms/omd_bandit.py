@@ -8,6 +8,20 @@ from src.algorithms.base import AlgorithmOutput, BaseAllocator
 
 
 class OMDBanditAllocator(BaseAllocator):
+    """One-point bandit gradient allocator (Flaxman-Kalai-McMahan style).
+
+    Each slot the parameter vector is perturbed along a random direction drawn uniformly
+    from the unit sphere, and the single scalar reward that comes back is turned into the
+    gradient estimate ``g = (d * r / delta) * v``, which is an unbiased estimate of the
+    gradient of the delta-smoothed objective. The iterate is then projected back onto a
+    box by clipping.
+
+    Note this is projected online gradient ascent with bandit feedback, using a Euclidean
+    projection -- there is no Bregman divergence or mirror map here, so it is *not* mirror
+    descent despite the legacy ``OMD`` in the class name. The benchmark reports it as
+    ``OGD_Bandit``.
+    """
+
     def __init__(
         self,
         s: int,
@@ -18,7 +32,7 @@ class OMDBanditAllocator(BaseAllocator):
         t_agg: float,
         d_max: np.ndarray | None = None,
     ):
-        super().__init__("OMD_BF")
+        super().__init__("OGD_Bandit")
         self.s = s
         self.k = k
         self.m = m
@@ -110,10 +124,11 @@ class OMDBanditAllocator(BaseAllocator):
             b[s_idx] = b_share * (np.sum(self.b_k) / self.s)
 
             c_score = self._positive(theta[s_idx, self.k : self.k + self.m])
-            c_share = c_score / np.maximum(np.sum(c_score), 1e-9)
-            m_idx = int(np.argmax(c_share))
+            m_idx = int(np.argmax(c_score))
             x[s_idx, m_idx] = 1
-            c[s_idx, m_idx] = c_share[m_idx] * (np.sum(self.c_m) / self.s)
+            # Association is exclusive; bid for the whole host and let the capacity
+            # projection split it if another slice picked the same one.
+            c[s_idx, m_idx] = self.c_m[m_idx]
 
             tau_raw[s_idx] = self._softplus(theta[s_idx, -1]) + 1e-3
 

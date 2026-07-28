@@ -6,9 +6,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from src.algorithms import CADMMAllocator
 from src.environment import FiveGEnvironment
-from src.experiments.run_benchmark_phase2 import build_slice_configs
+from src.experiments.run_benchmark_phase2 import build_slice_configs, generate_common_traces, make_algorithm
 
 
 def run_admm_ablation(seeds: int = 5, horizon: int = 200, load_scale: float = 1.2) -> pd.DataFrame:
@@ -17,9 +16,18 @@ def run_admm_ablation(seeds: int = 5, horizon: int = 200, load_scale: float = 1.
     rows = []
 
     for seed in range(seeds):
-        env = FiveGEnvironment(build_slice_configs(load_scale), seed=2000 + seed)
+        slice_cfgs = build_slice_configs(load_scale)
+        lambda_trace, channel_trace = generate_common_traces(
+            s=len(slice_cfgs), k=3, horizon=horizon, seed=2000 + seed, load_scale=load_scale
+        )
+        env = FiveGEnvironment(
+            slice_cfgs, seed=2000 + seed, lambda_trace=lambda_trace, channel_trace=channel_trace
+        )
         for r in rounds_list:
-            alg = CADMMAllocator(env.s, env.k, env.m, env.b_k, env.c_m, env.t_agg, rounds=r)
+            # Built through the shared factory so the ablation cannot drift from the
+            # benchmark's configuration; only the ADMM round budget is varied.
+            alg = make_algorithm("C_ADMM", env)
+            alg.rounds = r
             state = env.reset()
             alg.reset()
             for t in range(horizon):

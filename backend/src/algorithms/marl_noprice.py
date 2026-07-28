@@ -1,3 +1,9 @@
+"""LEGACY -- superseded by ``ppo_variants.IndependentMAPPOPPOAllocator``.
+
+Reference-only heuristic prototype; see the note in ``marl_price``. Not benchmarked and
+not recalibrated for the environment's physical units.
+"""
+
 from __future__ import annotations
 
 from typing import Dict

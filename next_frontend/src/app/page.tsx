@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useScroll, motion, AnimatePresence, useSpring } from 'framer-motion';
 import dynamic from 'next/dynamic';
 import { useNetworkData, SliceData } from '@/hooks/useNetworkData';
@@ -177,10 +177,13 @@ const BeatUI = ({ beat, index, active, data, slices, setSlices, load, setLoad }:
                         <span className="text-[0.75rem] text-white/70 font-medium">{index === 1 ? 'Live Network Slices' : 'Simulated Network Load'}</span>
                         <span className="text-[0.8rem] font-bold bg-white/10 px-2 py-0.5 rounded" style={{ color: beat.accent }}>{index === 1 ? slices : load.toFixed(1)}</span>
                       </div>
-                      <input 
-                        type="range" 
-                        min={index === 1 ? 1 : 0.1} 
-                        max={index === 1 ? 10 : 2.0} 
+                      {/* Ranges mirror the backend's ResearchRunRequest bounds
+                          (num_slices 3-6, load_center 0.6-2.0). Allowing values outside
+                          them let "Run Full Research" fail validation with a 422. */}
+                      <input
+                        type="range"
+                        min={index === 1 ? 3 : 0.6}
+                        max={index === 1 ? 6 : 2.0}
                         step={index === 1 ? 1 : 0.1}
                         value={index === 1 ? slices : load}
                         onChange={(e) => index === 1 ? setSlices(parseInt(e.target.value)) : setLoad(parseFloat(e.target.value))}
@@ -270,12 +273,14 @@ export default function Home() {
       const res = await fetch(`${BACKEND_URL}/api/research/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // Sized so the run finishes in a few minutes on a small shared-CPU instance.
+        // The backend clamps these anyway; see ResearchRunRequest in main.py.
         body: JSON.stringify({
           num_slices: cAdmmSlices,
           load_center: maanLoad,
-          seeds: 4,
-          horizon: 300,
-          n_mc_urlcc: 32,
+          seeds: 2,
+          horizon: 120,
+          n_mc_urlcc: 24,
         }),
       });
       const payload = await res.json();

@@ -1,0 +1,52 @@
+# Render blueprint: two separate services.
+#
+# The backend is a Python process holding PyTorch in memory; the frontend is a Node
+# server rendering Next.js. They cannot share one service -- different runtimes, different
+# build commands, different scaling characteristics -- so this defines one Web Service
+# each. Deploy with: Render Dashboard -> New -> Blueprint -> point at this repo.
+#
+# IMPORTANT (one manual step): NEXT_PUBLIC_* variables are inlined into the JavaScript
+# bundle at BUILD time, not read at runtime. `sync: false` below makes Render prompt for
+# the value. Set it to the backend service's URL, and note that changing it later requires
+# a frontend REDEPLOY, not just an environment-variable save.
+
+services:
+  # ---------------------------------------------------------------- backend
+  - type: web
+    name: aether-5g-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    # Single worker on purpose. The free instance has 512 MB RAM and importing torch,
+    # pandas, scipy and matplotlib already costs ~330 MB; a second worker would not fit.
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      # Keep BLAS single-threaded. The default is one thread per detected core, but a
+      # free instance gets a fraction of a CPU, so the extra threads only add memory and
+      # contention.
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: MPLBACKEND
+        value: Agg
+
+  # --------------------------------------------------------------- frontend
+  - type: web
+    name: aether-5g-frontend
+    runtime: node
+    plan: free
+    rootDir: next_frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start -- --port $PORT
+    envVars:
+      - key: NODE_VERSION
+        value: "20.18.0"
+      - key: NEXT_PUBLIC_BACKEND_URL
+        # Prompted at deploy time. Use the backend service's public URL, e.g.
+        # https://aether-5g-backend.onrender.com  (no trailing slash).
+        sync: false

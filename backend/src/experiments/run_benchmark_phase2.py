@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import gc
+import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, List
 
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import scipy.stats as stats
+import matplotlib
+
+# Force the non-interactive backend before pyplot is imported. Plots are rendered from a
+# worker thread on a headless server; any GUI backend would either fail to import or try
+# to touch a main-thread-only event loop.
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import scipy.stats as stats  # noqa: E402
 
 from src.algorithms import (
     CADMMAllocator,
@@ -25,7 +34,7 @@ ALGORITHM_ORDER = (
     "Independent_MAPPO_PPO",
     "C_ADMM",
     "Static_Greedy",
-    "OMD_BF",
+    "OGD_Bandit",
 )
 
 ALGO_COLORS = {
@@ -33,7 +42,7 @@ ALGO_COLORS = {
     "Independent_MAPPO_PPO": "#ff7f0e",
     "C_ADMM": "#2ca02c",
     "Static_Greedy": "#d62728",
-    "OMD_BF": "#9467bd",
+    "OGD_Bandit": "#9467bd",
 }
 
 ALGO_SHORT = {
@@ -41,8 +50,14 @@ ALGO_SHORT = {
     "Independent_MAPPO_PPO": "Ind-MAPPO",
     "C_ADMM": "C-ADMM",
     "Static_Greedy": "Static+Greedy",
-    "OMD_BF": "OMD-BF",
+    "OGD_Bandit": "OGD-Bandit",
 }
+
+# Render resolution for every saved figure. A rasterised figure is held in memory at
+# roughly (w*dpi) x (h*dpi) x 4 bytes, and `bbox_inches="tight"` renders twice, so this
+# is the main driver of peak RSS during the plotting phase. 140 dpi keeps the gallery
+# crisp on screen at a fraction of the memory (and produces smaller PNGs to serve).
+PLOT_DPI = int(os.environ.get("PLOT_DPI", "140"))
 
 LOAD_METRICS = {
     "utility_mean": ("Mean Utility", "Higher is better"),
@@ -73,10 +88,17 @@ class ExpConfig:
 
 
 def build_slice_configs(load_scale: float, num_slices: int = 3) -> List[SliceConfig]:
+    """Slice SLAs. See ``fiveg_env`` for units.
+
+    ``load_scale`` is applied to the traffic traces (see :func:`generate_common_traces`),
+    not here: the SLA of a slice does not change when the network gets busier. ``omega``
+    is a fixed processing density in cycles/bit -- URLLC costs the most compute per bit
+    (tight scheduling, redundancy), mMTC the least.
+    """
     base = [
-        SliceConfig("eMBB", r_min=45e6, d_max=0.028, alpha=1.2, beta=0.8, gamma=0.6, omega=95.0 * load_scale),
-        SliceConfig("URLLC", r_min=15e6, d_max=0.008, alpha=1.0, beta=1.5, gamma=1.8, omega=65.0 * load_scale, eps_urlcc=0.01),
-        SliceConfig("mMTC", r_min=6e6, d_max=0.050, alpha=0.9, beta=0.7, gamma=0.4, omega=50.0 * load_scale),
+        SliceConfig("eMBB", r_min=22e6, d_max=0.030, alpha=1.2, beta=0.8, gamma=0.6, omega=30.0),
+        SliceConfig("URLLC", r_min=6e6, d_max=0.008, alpha=1.0, beta=1.5, gamma=1.8, omega=45.0, eps_urlcc=0.01),
+        SliceConfig("mMTC", r_min=3e6, d_max=0.050, alpha=0.9, beta=0.7, gamma=0.4, omega=20.0),
     ]
     if num_slices <= 3:
         return base[:num_slices]
@@ -86,12 +108,12 @@ def build_slice_configs(load_scale: float, num_slices: int = 3) -> List[SliceCon
         extra.append(
             SliceConfig(
                 name=f"mMTC_{idx + 2}",
-                r_min=5e6,
+                r_min=2.5e6,
                 d_max=0.060,
                 alpha=0.85,
                 beta=0.65,
                 gamma=0.35,
-                omega=48.0 * load_scale,
+                omega=18.0,
             )
         )
     return base + extra
@@ -110,38 +132,70 @@ def static_slice_weights(num_slices: int) -> np.ndarray:
     return w / np.sum(w)
 
 
-def generate_common_traces(s: int, k: int, horizon: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
+def generate_common_traces(
+    s: int, k: int, horizon: int, seed: int, load_scale: float = 1.0
+) -> tuple[np.ndarray, np.ndarray]:
+    """Traffic and channel traces shared by every algorithm in a scenario.
+
+    ``load_scale`` multiplies the offered traffic, which is what "load" means on every
+    x-axis in this study. All algorithms in a scenario see byte-identical traces, so the
+    per-seed comparison is a paired design (see :func:`save_tables`).
+    """
     rng = np.random.default_rng(seed)
-    lambda_trace = rng.uniform(8e5, 4.2e6, size=(horizon + 1, s))
+    lambda_trace = load_scale * rng.uniform(FiveGEnvironment.lam_low, FiveGEnvironment.lam_high, size=(horizon + 1, s))
     channel_trace = rng.exponential(scale=1.0, size=(horizon + 1, s, k))
     return lambda_trace, channel_trace
 
 
 def make_algorithm(name: str, env: FiveGEnvironment):
     s, k, m = env.s, env.k, env.m
-    r_min = np.array([cfg.r_min for cfg in env.slice_configs], dtype=float)
-    d_max = np.array([cfg.d_max for cfg in env.slice_configs], dtype=float)
-    omega = np.array([cfg.omega for cfg in env.slice_configs], dtype=float)
+    r_min = env.r_min
+    d_max = env.d_max
+    omega = env.omega
+    alpha = np.array([cfg.alpha for cfg in env.slice_configs], dtype=float)
+    beta = np.array([cfg.beta for cfg in env.slice_configs], dtype=float)
     if name == "MAAN_PPO":
         return MAANPPOAllocator(s, k, m, env.b_k, env.c_m, env.t_agg, r_min=r_min, d_max=d_max)
     if name == "Independent_MAPPO_PPO":
         return IndependentMAPPOPPOAllocator(s, k, m, env.b_k, env.c_m, env.t_agg, r_min=r_min, d_max=d_max)
     if name == "C_ADMM":
-        return CADMMAllocator(s, k, m, env.b_k, env.c_m, env.t_agg)
+        return CADMMAllocator(
+            s, k, m, env.b_k, env.c_m, env.t_agg,
+            r_min=r_min, d_max=d_max, omega=omega, alpha=alpha, beta=beta,
+            w_prb=env.w_prb, n0=env.n0, l_pkt=env.l_pkt,
+        )
     if name == "Static_Greedy":
-        return StaticGreedyAllocator(static_slice_weights(s), s, k, m, env.b_k, env.c_m, env.t_agg, r_min=r_min, d_max=d_max, omega=omega)
-    if name == "OMD_BF":
+        return StaticGreedyAllocator(
+            static_slice_weights(s), s, k, m, env.b_k, env.c_m, env.t_agg,
+            r_min=r_min, d_max=d_max, omega=omega, l_pkt=env.l_pkt,
+        )
+    if name == "OGD_Bandit":
         return OMDBanditAllocator(s, k, m, env.b_k, env.c_m, env.t_agg, d_max=d_max)
     raise ValueError(f"Unknown algorithm: {name}")
 
 
+def _jain_index(x: np.ndarray) -> float:
+    """Jain's fairness index, (sum x)^2 / (n * sum x^2), for non-negative x."""
+    x = np.maximum(np.asarray(x, dtype=float), 0.0)
+    denom = len(x) * float(np.sum(x**2))
+    if denom <= 0.0:
+        return float("nan")
+    return float(np.sum(x) ** 2 / denom)
+
+
 def ci95(x: np.ndarray) -> tuple[float, float]:
-    m = float(np.mean(x))
-    if len(x) > 1:
-        se = float(np.std(x, ddof=1) / np.sqrt(len(x)))
-    else:
-        se = 0.0
-    return m, 1.96 * se
+    """Mean and 95% CI half-width using Student's t.
+
+    With the handful of seeds used here the normal quantile 1.96 understates the interval
+    by roughly 30% (t(0.975, 5) = 2.571), so the t quantile is used instead.
+    """
+    x = np.asarray(x, dtype=float)
+    n = len(x)
+    m = float(np.mean(x)) if n else float("nan")
+    if n > 1:
+        se = float(np.std(x, ddof=1) / np.sqrt(n))
+        return m, float(stats.t.ppf(0.975, n - 1)) * se
+    return m, 0.0
 
 
 def _safe_series_mean(arr: np.ndarray | None) -> float:
@@ -198,7 +252,10 @@ def run_one(name: str, alg, env: FiveGEnvironment, horizon: int, n_mc_urlcc: int
                 "qos_success": float(np.mean(metrics["qos_ok"])),
                 "urlcc_delay": float(metrics["delays"][1]),
                 "embb_rate": float(metrics["rates"][0]),
-                "fairness_jain": float((np.sum(metrics["utilities"]) ** 2) / (len(metrics["utilities"]) * np.sum(metrics["utilities"] ** 2) + 1e-9)),
+                # Jain's index is only meaningful on a non-negative quantity, so it is
+                # computed on achieved rates. Applying it to utilities (which are signed)
+                # produces a number in [0, 1] that means nothing.
+                "fairness_jain": _jain_index(metrics["rates"]),
                 "radio_util": float(np.mean(metrics["rate_utilization"])),
                 "compute_util": float(np.mean(metrics["compute_utilization"])),
                 "transport_util": float(metrics["transport_utilization"]),
@@ -236,7 +293,9 @@ def run_experiment(
         for load_scale in cfg.load_scales:
             slice_cfgs = build_slice_configs(load_scale, num_slices=cfg.num_slices)
             scenario_seed = 1000 + 97 * seed + int(round(100 * load_scale))
-            lambda_trace, channel_trace = generate_common_traces(s=len(slice_cfgs), k=3, horizon=cfg.horizon, seed=scenario_seed)
+            lambda_trace, channel_trace = generate_common_traces(
+                s=len(slice_cfgs), k=3, horizon=cfg.horizon, seed=scenario_seed, load_scale=load_scale
+            )
 
             for alg_idx, alg_name in enumerate(ALGORITHM_ORDER):
                 alg_seed = scenario_seed + 31 * (alg_idx + 1)
@@ -288,24 +347,71 @@ def save_tables(df: pd.DataFrame, out_dir: Path) -> tuple[pd.DataFrame, pd.DataF
     summary_df = pd.DataFrame(rows)
     summary_df.to_csv(out_dir / "summary_with_ci95.csv", index=False)
 
-    target_alg = "MAAN_PPO"
-    sig_rows = []
-    if target_alg in final["algorithm"].values:
-        for load in final["load_scale"].unique():
-            base_data = final[(final["algorithm"] == target_alg) & (final["load_scale"] == load)]
-            for alg in final["algorithm"].unique():
-                if alg == target_alg:
-                    continue
-                comp_data = final[(final["algorithm"] == alg) & (final["load_scale"] == load)]
-                row = {"load_scale": load, "algorithm": alg}
-                for met in ["utility_mean", "qos_success", "delay_mean"]:
-                    _, pval = stats.ttest_ind(base_data[met], comp_data[met], equal_var=False)
-                    row[f"{met}_pval_vs_{target_alg}"] = float(pval)
-                sig_rows.append(row)
-    sig_df = pd.DataFrame(sig_rows)
+    sig_df = _significance_table(final, metrics=["utility_mean", "qos_success", "delay_mean"])
     if not sig_df.empty:
         sig_df.to_csv(out_dir / "statistical_significance.csv", index=False)
     return summary_df, sig_df
+
+
+def _holm_bonferroni(pvals: np.ndarray) -> np.ndarray:
+    """Holm-Bonferroni step-down adjusted p-values (family-wise error rate control)."""
+    p = np.asarray(pvals, dtype=float)
+    finite = np.isfinite(p)
+    adj = np.full_like(p, np.nan)
+    idx = np.flatnonzero(finite)
+    if idx.size == 0:
+        return adj
+    order = idx[np.argsort(p[idx])]
+    n = order.size
+    running = 0.0
+    for rank, pos in enumerate(order):
+        running = max(running, (n - rank) * p[pos])
+        adj[pos] = min(running, 1.0)
+    return adj
+
+
+def _significance_table(final: pd.DataFrame, metrics: List[str], target_alg: str = "MAAN_PPO") -> pd.DataFrame:
+    """Paired t-tests of every algorithm against ``target_alg``, per load.
+
+    All algorithms in a scenario are driven by identical traffic and channel traces
+    (see :func:`generate_common_traces`), so seeds pair one-to-one across algorithms.
+    That makes this a repeated-measures design: ``ttest_rel`` is the correct test and is
+    strictly more powerful than the unpaired Welch test. Within each metric, p-values are
+    then Holm-Bonferroni adjusted across all (algorithm, load) comparisons -- a 5-load
+    sweep against 4 competitors is 20 simultaneous tests per metric, so uncorrected
+    p-values would overstate significance badly.
+    """
+    if target_alg not in set(final["algorithm"]):
+        return pd.DataFrame()
+
+    rows = []
+    for load in sorted(final["load_scale"].unique()):
+        base = final[(final["algorithm"] == target_alg) & (final["load_scale"] == load)].sort_values("seed")
+        for alg in ALGORITHM_ORDER:
+            if alg == target_alg or alg not in set(final["algorithm"]):
+                continue
+            comp = final[(final["algorithm"] == alg) & (final["load_scale"] == load)].sort_values("seed")
+            row = {"load_scale": load, "algorithm": alg, "n_seeds": int(len(base))}
+            for met in metrics:
+                a = base[met].to_numpy()
+                b = comp[met].to_numpy()
+                # ttest_rel needs >= 2 pairs and non-identical samples to be defined.
+                if len(a) != len(b) or len(a) < 2 or np.allclose(a, b):
+                    pval = float("nan")
+                else:
+                    pval = float(stats.ttest_rel(a, b).pvalue)
+                row[f"{met}_pval_vs_{target_alg}"] = pval
+                row[f"{met}_delta_vs_{target_alg}"] = float(np.mean(a) - np.mean(b))
+            rows.append(row)
+
+    sig_df = pd.DataFrame(rows)
+    if sig_df.empty:
+        return sig_df
+    # Correct across the entire family of tests in this table.
+    for met in metrics:
+        col = f"{met}_pval_vs_{target_alg}"
+        sig_df[f"{met}_padj_vs_{target_alg}"] = _holm_bonferroni(sig_df[col].to_numpy())
+    return sig_df
 
 
 def _add_caption(text: str) -> None:
@@ -337,7 +443,7 @@ def _plot_load_metric_with_ci(df: pd.DataFrame, metric: str, ylabel: str, captio
     plt.legend(ncols=2, fontsize=9)
     _add_caption(caption)
     plt.tight_layout()
-    plt.savefig(out_path, dpi=180, bbox_inches="tight")
+    plt.savefig(out_path, dpi=PLOT_DPI, bbox_inches="tight")
     plt.close()
 
 
@@ -351,6 +457,8 @@ def plot_all(df: pd.DataFrame, out_dir: Path) -> None:
             caption=f"Takeaway: {note} while preserving stability under increasing offered load.",
             out_path=out_dir / f"{metric}_vs_load.png",
         )
+    plt.close("all")
+    gc.collect()
 
 
 def plot_convergence_with_ci(df: pd.DataFrame, out_dir: Path, high_load: float) -> None:
@@ -386,7 +494,7 @@ def plot_convergence_with_ci(df: pd.DataFrame, out_dir: Path, high_load: float) 
         plt.legend(ncols=2, fontsize=9)
         _add_caption("Takeaway: faster stabilization with tighter uncertainty indicates stronger online adaptation.")
         plt.tight_layout()
-        plt.savefig(out_dir / f"convergence_{metric}_high_load.png", dpi=180, bbox_inches="tight")
+        plt.savefig(out_dir / f"convergence_{metric}_high_load.png", dpi=PLOT_DPI, bbox_inches="tight")
         plt.close()
 
 
@@ -408,7 +516,7 @@ def plot_urlcc_tail(df: pd.DataFrame, out_dir: Path, high_load: float) -> None:
     plt.legend(ncols=2, fontsize=9)
     _add_caption("Takeaway: left-shifted CDF indicates more consistent low-latency behavior.")
     plt.tight_layout()
-    plt.savefig(out_dir / "urlcc_delay_cdf_high_load.png", dpi=180, bbox_inches="tight")
+    plt.savefig(out_dir / "urlcc_delay_cdf_high_load.png", dpi=PLOT_DPI, bbox_inches="tight")
     plt.close()
 
     plt.figure(figsize=(8, 4.8))
@@ -426,7 +534,7 @@ def plot_urlcc_tail(df: pd.DataFrame, out_dir: Path, high_load: float) -> None:
     plt.legend(ncols=2, fontsize=9)
     _add_caption("Takeaway: lower tail probabilities at strict delay targets imply stronger URLLC reliability.")
     plt.tight_layout()
-    plt.savefig(out_dir / "urlcc_delay_ccdf_high_load.png", dpi=180, bbox_inches="tight")
+    plt.savefig(out_dir / "urlcc_delay_ccdf_high_load.png", dpi=PLOT_DPI, bbox_inches="tight")
     plt.close()
 
 
@@ -445,7 +553,8 @@ def _grouped_distribution_plot(df: pd.DataFrame, metric: str, ylabel: str, out_p
             vals.append(arr)
             labels.append(ALGO_SHORT[alg])
         if mode == "box":
-            bp = ax.boxplot(vals, patch_artist=True, labels=labels, showfliers=False)
+            # `labels=` was deprecated in matplotlib 3.9 and removed in 3.11.
+            bp = ax.boxplot(vals, patch_artist=True, tick_labels=labels, showfliers=False)
             for patch, alg in zip(bp["boxes"], ALGORITHM_ORDER):
                 patch.set_facecolor(ALGO_COLORS[alg])
                 patch.set_alpha(0.45)
@@ -466,7 +575,7 @@ def _grouped_distribution_plot(df: pd.DataFrame, metric: str, ylabel: str, out_p
     plt.suptitle(f"{title} Across Seeds by Load")
     _add_caption("Takeaway: tighter spread across seeds indicates robust algorithmic behavior.")
     plt.tight_layout()
-    plt.savefig(out_path, dpi=180, bbox_inches="tight")
+    plt.savefig(out_path, dpi=PLOT_DPI, bbox_inches="tight")
     plt.close()
 
 
@@ -506,7 +615,7 @@ def plot_pareto(df: pd.DataFrame, out_dir: Path) -> None:
     plt.grid(True, alpha=0.3)
     _add_caption("Takeaway: points farther up-right dominate the utility-reliability trade-off.")
     plt.tight_layout()
-    plt.savefig(out_dir / "pareto_utility_vs_qos.png", dpi=180, bbox_inches="tight")
+    plt.savefig(out_dir / "pareto_utility_vs_qos.png", dpi=PLOT_DPI, bbox_inches="tight")
     plt.close()
 
     plt.figure(figsize=(7, 5.2))
@@ -528,7 +637,7 @@ def plot_pareto(df: pd.DataFrame, out_dir: Path) -> None:
     plt.grid(True, alpha=0.3)
     _add_caption("Takeaway: high utility with low delay marks stronger operating points.")
     plt.tight_layout()
-    plt.savefig(out_dir / "pareto_utility_vs_delay.png", dpi=180, bbox_inches="tight")
+    plt.savefig(out_dir / "pareto_utility_vs_delay.png", dpi=PLOT_DPI, bbox_inches="tight")
     plt.close()
 
 
@@ -573,7 +682,7 @@ def plot_prices(df: pd.DataFrame, out_dir: Path, high_load: float) -> None:
         plt.legend(ncols=2, fontsize=9)
         _add_caption("Takeaway: smoother bounded prices indicate stable decentralized negotiation.")
         plt.tight_layout()
-        plt.savefig(out_dir / f"{metric}_trajectory_high_load.png", dpi=180, bbox_inches="tight")
+        plt.savefig(out_dir / f"{metric}_trajectory_high_load.png", dpi=PLOT_DPI, bbox_inches="tight")
         plt.close()
 
 
@@ -611,7 +720,7 @@ def plot_admm_diagnostics(df: pd.DataFrame, out_dir: Path) -> None:
         plt.legend()
         _add_caption("Takeaway: downward residual trends indicate stronger ADMM consensus convergence.")
         plt.tight_layout()
-        plt.savefig(out_dir / filename, dpi=180, bbox_inches="tight")
+        plt.savefig(out_dir / filename, dpi=PLOT_DPI, bbox_inches="tight")
         plt.close()
 
     rounds = admm[admm["cadmm_rounds"].notna()]
@@ -625,7 +734,7 @@ def plot_admm_diagnostics(df: pd.DataFrame, out_dir: Path) -> None:
         plt.grid(True, alpha=0.3)
         _add_caption("Takeaway: this view quantifies the communication-performance trade-off of extra ADMM rounds.")
         plt.tight_layout()
-        plt.savefig(out_dir / "cadmm_rounds_vs_utility.png", dpi=180, bbox_inches="tight")
+        plt.savefig(out_dir / "cadmm_rounds_vs_utility.png", dpi=PLOT_DPI, bbox_inches="tight")
         plt.close()
 
         mean_rounds = rounds.groupby(["load_scale"], as_index=False)["cadmm_rounds"].mean()
@@ -637,7 +746,7 @@ def plot_admm_diagnostics(df: pd.DataFrame, out_dir: Path) -> None:
         plt.grid(True, alpha=0.3)
         _add_caption("Takeaway: higher rounds at heavier loads reflect increased consensus difficulty.")
         plt.tight_layout()
-        plt.savefig(out_dir / "cadmm_avg_rounds_vs_load.png", dpi=180, bbox_inches="tight")
+        plt.savefig(out_dir / "cadmm_avg_rounds_vs_load.png", dpi=PLOT_DPI, bbox_inches="tight")
         plt.close()
 
 
@@ -662,12 +771,12 @@ def plot_runtime(df: pd.DataFrame, out_dir: Path) -> None:
     plt.grid(True, axis="y", alpha=0.3)
     _add_caption("Takeaway: this summarizes raw compute cost independent of reward quality.")
     plt.tight_layout()
-    plt.savefig(out_dir / "runtime_overall_bar.png", dpi=180, bbox_inches="tight")
+    plt.savefig(out_dir / "runtime_overall_bar.png", dpi=PLOT_DPI, bbox_inches="tight")
     plt.close()
 
 
 def _plot_sig_heatmap(sig_df: pd.DataFrame, p_col: str, title: str, out_path: Path) -> None:
-    if sig_df.empty:
+    if sig_df.empty or p_col not in sig_df.columns:
         return
     algs = [a for a in ALGORITHM_ORDER if a != "MAAN_PPO"]
     loads = sorted(sig_df["load_scale"].unique())
@@ -694,7 +803,7 @@ def _plot_sig_heatmap(sig_df: pd.DataFrame, p_col: str, title: str, out_path: Pa
             plt.text(j, i, txt, ha="center", va="center", fontsize=7)
     _add_caption("Takeaway: darker cells indicate stronger statistical separation from MAAN.")
     plt.tight_layout()
-    plt.savefig(out_path, dpi=180, bbox_inches="tight")
+    plt.savefig(out_path, dpi=PLOT_DPI, bbox_inches="tight")
     plt.close()
 
 
@@ -702,22 +811,23 @@ def plot_significance_heatmaps(sig_df: pd.DataFrame, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     if sig_df.empty:
         return
+    # Plot the Holm-adjusted p-values -- the raw ones overstate significance.
     _plot_sig_heatmap(
         sig_df,
-        "utility_mean_pval_vs_MAAN_PPO",
-        "Significance Heatmap: Utility (vs MAAN)",
+        "utility_mean_padj_vs_MAAN_PPO",
+        "Significance Heatmap: Utility (vs MAAN, Holm-adjusted)",
         out_dir / "significance_heatmap_utility.png",
     )
     _plot_sig_heatmap(
         sig_df,
-        "qos_success_pval_vs_MAAN_PPO",
-        "Significance Heatmap: QoS Success (vs MAAN)",
+        "qos_success_padj_vs_MAAN_PPO",
+        "Significance Heatmap: QoS Success (vs MAAN, Holm-adjusted)",
         out_dir / "significance_heatmap_qos_success.png",
     )
     _plot_sig_heatmap(
         sig_df,
-        "delay_mean_pval_vs_MAAN_PPO",
-        "Significance Heatmap: Delay (vs MAAN)",
+        "delay_mean_padj_vs_MAAN_PPO",
+        "Significance Heatmap: Delay (vs MAAN, Holm-adjusted)",
         out_dir / "significance_heatmap_delay.png",
     )
 
@@ -726,14 +836,24 @@ def plot_publication_pack(df: pd.DataFrame, out_dir: Path, sig_df: pd.DataFrame)
     pub_dir = out_dir / "plots_publication"
     pub_dir.mkdir(parents=True, exist_ok=True)
     high_load = float(np.max(df["load_scale"]))
-    plot_convergence_with_ci(df, pub_dir, high_load=high_load)
-    plot_urlcc_tail(df, pub_dir, high_load=high_load)
-    plot_distributions(df, pub_dir)
-    plot_pareto(df, pub_dir)
-    plot_prices(df, pub_dir, high_load=high_load)
-    plot_admm_diagnostics(df, pub_dir)
-    plot_runtime(df, pub_dir)
-    plot_significance_heatmaps(sig_df, pub_dir)
+
+    stages = (
+        lambda: plot_convergence_with_ci(df, pub_dir, high_load=high_load),
+        lambda: plot_urlcc_tail(df, pub_dir, high_load=high_load),
+        lambda: plot_distributions(df, pub_dir),
+        lambda: plot_pareto(df, pub_dir),
+        lambda: plot_prices(df, pub_dir, high_load=high_load),
+        lambda: plot_admm_diagnostics(df, pub_dir),
+        lambda: plot_runtime(df, pub_dir),
+        lambda: plot_significance_heatmaps(sig_df, pub_dir),
+    )
+    for stage in stages:
+        stage()
+        # Reclaim between stages rather than at the end. This whole pack renders inside a
+        # 512 MB instance, and matplotlib holds font caches and figure buffers that only
+        # a close-all plus a collection actually releases.
+        plt.close("all")
+        gc.collect()
 
 
 if __name__ == "__main__":

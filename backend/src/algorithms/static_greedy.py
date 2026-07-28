@@ -5,6 +5,7 @@ from typing import Dict
 import numpy as np
 
 from src.algorithms.base import AlgorithmOutput, BaseAllocator
+from src.environment.fiveg_env import D_UNSTABLE
 
 
 class StaticGreedyAllocator(BaseAllocator):
@@ -20,6 +21,7 @@ class StaticGreedyAllocator(BaseAllocator):
         r_min: np.ndarray | None = None,
         d_max: np.ndarray | None = None,
         omega: np.ndarray | None = None,
+        l_pkt: float = 12000.0,
         j_max: int = 16,
     ):
         super().__init__("Static_Greedy")
@@ -32,16 +34,21 @@ class StaticGreedyAllocator(BaseAllocator):
         self.t_agg = float(t_agg)
         self.r_min = np.full(s, 10e6) if r_min is None else r_min.astype(float)
         self.d_max = np.full(s, 0.02) if d_max is None else d_max.astype(float)
-        self.omega = np.full(s, 60.0) if omega is None else omega.astype(float)
+        self.omega = np.full(s, 30.0) if omega is None else omega.astype(float)
         self.priority = np.argsort(self.d_max)  # URLLC-like slices first.
         self.j_max = j_max
-        self.b_step = 1.0
-        self.c_step_max = 30.0
-        self.t_step_max = 15.0
+        # Step sizes and donor thresholds are fractions of capacity, not absolute
+        # amounts, so they stay meaningful whatever units the capacities carry.
+        self.b_step = 1.0                                    # [PRB] indivisible
+        self.c_step_max = 0.08 * float(np.mean(self.c_m))    # [cycle/s]
+        self.t_step_max = 0.04 * self.t_agg                  # [bit/s]
+        self.c_floor = 1e-3 * float(np.mean(self.c_m))
+        self.t_floor = 1e-3 * self.t_agg
         self.safe = 1e-6
         self.w_prb = 180e3
         self.n0 = 1e-9
         self.t_tti = 1e-3
+        self.l_pkt = float(l_pkt)
         self.pk = np.ones(self.k, dtype=float)
         self.prev_b = np.zeros((self.s, self.k), dtype=float)
         self.prev_c = np.zeros((self.s, self.m), dtype=float)
@@ -63,9 +70,13 @@ class StaticGreedyAllocator(BaseAllocator):
         tau = self.slice_weights * self.t_agg
 
         if self.has_prev:
-            b = np.clip(b, self.prev_b - 8.0, self.prev_b + 8.0)
-            c = np.clip(c, self.prev_c - 40.0, self.prev_c + 40.0)
-            tau = np.clip(tau, self.prev_tau - 20.0, self.prev_tau + 20.0)
+            # Rate-limit reallocation between slots (churn is operationally expensive).
+            b_slew = 0.05 * float(np.mean(self.b_k))
+            c_slew = 0.12 * float(np.mean(self.c_m))
+            t_slew = 0.06 * self.t_agg
+            b = np.clip(b, self.prev_b - b_slew, self.prev_b + b_slew)
+            c = np.clip(c, self.prev_c - c_slew, self.prev_c + c_slew)
+            tau = np.clip(tau, self.prev_tau - t_slew, self.prev_tau + t_slew)
 
         b = self._project_prb_capacity(b)
         c = self._project_domain_capacity(c, self.c_m)
@@ -150,7 +161,7 @@ class StaticGreedyAllocator(BaseAllocator):
 
     def _repair_compute(self, s_target: int, c: np.ndarray, x: np.ndarray) -> bool:
         m_idx = int(np.argmax(x[s_target]))
-        donors = [r for r in range(self.s) if r != s_target and x[r, m_idx] == 1 and c[r, m_idx] > 1.0]
+        donors = [r for r in range(self.s) if r != s_target and x[r, m_idx] == 1 and c[r, m_idx] > self.c_floor]
         if not donors:
             return False
         donor = int(max(donors, key=lambda r: c[r, m_idx] / max(self.d_max[r], self.safe)))
@@ -162,7 +173,7 @@ class StaticGreedyAllocator(BaseAllocator):
         return True
 
     def _repair_transport(self, s_target: int, tau: np.ndarray) -> bool:
-        donors = [r for r in range(self.s) if r != s_target and tau[r] > 1.0]
+        donors = [r for r in range(self.s) if r != s_target and tau[r] > self.t_floor]
         if not donors:
             return False
         donor = int(max(donors, key=lambda r: tau[r] / max(self.d_max[r], self.safe)))
@@ -183,12 +194,17 @@ class StaticGreedyAllocator(BaseAllocator):
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         sinr = self._compute_sinr(channel)
         rates = np.sum(b * self.w_prb * np.log2(1.0 + sinr), axis=1)
-        d_radio = 1.0 / np.maximum(rates - lam, 1e3) + self.t_tti
         c_slice = np.sum(c, axis=1)
-        d_comp = self.omega / np.maximum(c_slice, self.safe)
-        d_trans = lam / np.maximum(tau, self.safe)
+        # Same M/M/1 model the environment scores against (see fiveg_env).
+        d_radio = self._queue_delay(rates, lam) + self.t_tti
+        d_trans = self._queue_delay(tau, lam)
+        d_comp = self._queue_delay(c_slice / np.maximum(self.omega, self.safe), lam)
         delays = d_radio + d_comp + d_trans
         return rates, delays, d_radio, d_trans, d_comp, sinr
+
+    def _queue_delay(self, service_rate: np.ndarray, arrival_rate: np.ndarray) -> np.ndarray:
+        headroom = np.asarray(service_rate, dtype=float) - np.asarray(arrival_rate, dtype=float)
+        return self.l_pkt / np.maximum(headroom, self.l_pkt / D_UNSTABLE)
 
     def _compute_sinr(self, gains: np.ndarray) -> np.ndarray:
         inter = np.sum(gains * self.pk[None, :], axis=1, keepdims=True) - gains * self.pk[None, :]
@@ -202,9 +218,11 @@ class StaticGreedyAllocator(BaseAllocator):
             col_sum = int(np.sum(col))
             rem = cap - col_sum
             if rem > 0:
+                # Hand out every leftover PRB, cycling by weight -- `order[:rem]` would
+                # stop after one pass and leave up to cap-s PRBs stranded.
                 order = np.argsort(-self.slice_weights)
-                for s_idx in order[:rem]:
-                    col[s_idx] += 1
+                for i in range(rem):
+                    col[order[i % len(order)]] += 1
             elif rem < 0:
                 over = -rem
                 order = np.argsort(-col)
