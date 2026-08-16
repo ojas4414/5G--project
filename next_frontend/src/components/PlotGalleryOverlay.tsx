@@ -99,15 +99,16 @@ export function PlotGalleryOverlay({ open, onClose, refreshToken, initialTab }: 
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       // A zoomed figure is a layer above the gallery: back out of that first.
-      setSelected(prev => {
-        if (prev) return null;
-        onClose();
-        return null;
-      });
+      // `selected` is read from the closure, not inside a state updater -- calling the
+      // parent's onClose() from within setSelected() updates Home while this component
+      // is rendering, which React warns about and which is not safe under concurrent
+      // rendering. The extra `selected` dependency just re-binds the listener.
+      if (selected) setSelected(null);
+      else onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open, onClose, selected]);
 
   const currentPlots = useMemo(() => manifest[activeTab] || [], [manifest, activeTab]);
 
