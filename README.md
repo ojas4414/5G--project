@@ -272,7 +272,7 @@ Scroll down through the page. Each full-screen section introduces one concept:
 | **Beat 2** — MAAN | Deep-dive card with live sparkline + a **slider to control network load** |
 | **Beat 3** — Static Greedy | Performance comparison bar showing why this is the baseline to beat |
 | **Beat 4** — Full System | Combined dashboard with scores, sparklines, and average utility for all algorithms |
-| **Beat 5** — Connect API | Input field to connect your own live 5G telemetry endpoint |
+| **Beat 5** — Real Results | Button that opens the benchmark figure gallery served by the backend. Ingesting telemetry from an external 5G network is **not** implemented. |
 
 ### Navigation
 

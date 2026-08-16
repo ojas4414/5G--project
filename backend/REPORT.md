@@ -53,7 +53,11 @@ module docstring in `src/environment/fiveg_env.py`), so the mean sojourn time
   not differentiated (see the `cadmm.py` module docstring).
 - Jain's index is computed on rates, not on signed utilities.
 - Confidence intervals use Student's *t*; comparisons use paired *t*-tests with
-  Holm-Bonferroni correction, matching the common-random-numbers design.
+  Holm-Bonferroni correction, matching the common-random-numbers design. Scope: the
+  significance table only tests each algorithm against `target_alg="MAAN_PPO"`, and only
+  on 3 of the 14 recorded metrics (`utility_mean`, `qos_success`, `delay_mean`). The
+  Holm family is the 20 (algorithm × load) tests within each metric. Pairs that do not
+  involve MAAN_PPO — e.g. Ind-MAPPO vs Static_Greedy — are not tested at all.
 - `load_scale` now scales offered traffic (previously it scaled only compute demand,
   despite every plot labelling its x-axis "Load Scale").
 

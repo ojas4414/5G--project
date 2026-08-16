@@ -28,9 +28,10 @@ interface BeatUIProps {
   setSlices: (val: number) => void;
   load: number;
   setLoad: (val: number) => void;
+  onOpenPlots: () => void;
 }
 
-const BeatUI = ({ beat, index, active, data, slices, setSlices, load, setLoad }: BeatUIProps) => {
+const BeatUI = ({ beat, index, active, data, slices, setSlices, load, setLoad, onOpenPlots }: BeatUIProps) => {
   const cAdmmData = data.find((d: SliceData) => d.algorithm === 'C_ADMM') || { utilValue: 0, history: [] };
   const maanData = data.find((d: SliceData) => d.algorithm === 'MAAN') || { utilValue: 0, history: [] };
   const greedyData = data.find((d: SliceData) => d.algorithm === 'Static_Greedy') || { utilValue: 0, history: [] };
@@ -123,12 +124,16 @@ const BeatUI = ({ beat, index, active, data, slices, setSlices, load, setLoad }:
 
                 {index === 5 && (
                   <div className="flex flex-col items-center">
-                    <input type="text" placeholder="wss://your-api-endpoint.com/telemetry"
-                      className="w-full max-w-[400px] bg-white/5 border border-white/10 rounded-xl px-5 py-3.5 text-white font-mono text-[0.85rem] mb-4 focus:outline-none focus:border-[#00E5FF]/50 transition-colors" />
-                    <button className="w-full max-w-[400px] bg-[#00E5FF] hover:bg-[#0A0A0F] text-[#0A0A0F] hover:text-[#00E5FF] border border-[#00E5FF] font-bold tracking-[0.2em] uppercase py-3.5 rounded-xl transition-all shadow-[0_0_15px_rgba(0,229,255,0.3)]">
-                      CONNECT API →
+                    <button
+                      onClick={onOpenPlots}
+                      className="w-full max-w-[400px] bg-[#00E5FF] hover:bg-[#0A0A0F] text-[#0A0A0F] hover:text-[#00E5FF] border border-[#00E5FF] font-bold tracking-[0.2em] uppercase py-3.5 rounded-xl transition-all shadow-[0_0_15px_rgba(0,229,255,0.3)]"
+                    >
+                      VIEW BENCHMARK RESULTS →
                     </button>
-                    <p className="text-[0.75rem] text-white/20 mt-3">Or continue with simulation mode</p>
+                    <p className="text-[0.75rem] text-white/25 mt-3 max-w-[400px] text-center leading-relaxed">
+                      Served from the backend API. Ingesting telemetry from an external 5G
+                      network is not implemented.
+                    </p>
                   </div>
                 )}
               </>
@@ -493,6 +498,7 @@ export default function Home() {
             setSlices={setCAdmmSlices}
             load={maanLoad}
             setLoad={setMaanLoad}
+            onOpenPlots={() => setPlotGalleryOpen(true)}
           />
         ))}
       </div>
