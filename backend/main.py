@@ -35,8 +35,14 @@ app.add_middleware(
 
 PHASE2_DIR = BASE_DIR / "outputs_phase2"
 PHASE1_DIR = BASE_DIR / "outputs"
-PHASE2_DIR.mkdir(parents=True, exist_ok=True)
-PHASE1_DIR.mkdir(parents=True, exist_ok=True)
+# The dashboard's benchmark button runs a deliberately small sweep (see
+# ResearchRunRequest defaults: 2 seeds, 3 loads, horizon 120). It must never overwrite
+# outputs_phase2/, which holds the committed 6-seed x 5-load x horizon-500 study that the
+# README and the paper figures cite -- a demo click would silently replace those plots
+# with 3-load ones and nothing in the UI would say so. Separate directory, separate mount.
+DEMO_DIR = BASE_DIR / "outputs_demo"
+for _d in (PHASE2_DIR, PHASE1_DIR, DEMO_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
 
 RESEARCH_LOCK = threading.Lock()
 RESEARCH_JOBS: dict[str, dict] = {}
@@ -46,7 +52,7 @@ LATEST_RESEARCH_JOB_ID: str | None = None
 # instance sleeps after idling and loses the process, after which the dashboard would poll
 # a job_id that 404s forever with no way to recover. Persisting lets a woken instance
 # report the last known outcome instead.
-JOBS_FILE = PHASE2_DIR / "research_jobs.json"
+JOBS_FILE = DEMO_DIR / "research_jobs.json"
 MAX_PERSISTED_JOBS = 20
 
 
@@ -146,9 +152,9 @@ def _run_research_job(job_id: str, req_data: dict) -> None:
             n_mc_urlcc=int(req_data["n_mc_urlcc"]),
             load_scales=load_scales,
             num_slices=int(req_data["num_slices"]),
-            out_dir="outputs_phase2",
+            out_dir="outputs_demo",
         )
-        _update_job(job_id, message="Running multi-algorithm benchmark...", progress=0.02)
+        _update_job(job_id, message="Running demo benchmark (reduced sweep)...", progress=0.02)
 
         def on_progress(done: int, total: int, info: dict) -> None:
             pct = 0.05 + 0.65 * (done / max(total, 1))
@@ -157,16 +163,16 @@ def _run_research_job(job_id: str, req_data: dict) -> None:
 
         result = run_experiment(cfg, progress_callback=on_progress)
         _update_job(job_id, message="Saving tables...", progress=0.75)
-        result.to_csv(PHASE2_DIR / "benchmark_results_phase2.csv", index=False)
-        _, sig_df = save_tables(result, PHASE2_DIR)
+        result.to_csv(DEMO_DIR / "benchmark_results_demo.csv", index=False)
+        _, sig_df = save_tables(result, DEMO_DIR)
 
         _update_job(job_id, message="Rendering core plots...", progress=0.82)
-        plot_all(result, PHASE2_DIR / "plots")
+        plot_all(result, DEMO_DIR / "plots")
 
         _update_job(job_id, message="Rendering publication plot pack...", progress=0.90)
-        plot_publication_pack(result, PHASE2_DIR, sig_df)
+        plot_publication_pack(result, DEMO_DIR, sig_df)
 
-        with open(PHASE2_DIR / "config_used.json", "w", encoding="utf-8") as fp:
+        with open(DEMO_DIR / "config_used.json", "w", encoding="utf-8") as fp:
             json.dump(asdict(cfg), fp, indent=2)
 
         _update_job(
@@ -174,7 +180,10 @@ def _run_research_job(job_id: str, req_data: dict) -> None:
             persist=True,
             status="completed",
             progress=1.0,
-            message="Full research run completed.",
+            message=(
+                f"Demo run completed ({cfg.seeds} seeds x {len(cfg.load_scales)} loads x "
+                f"horizon {cfg.horizon}). Committed study figures are unchanged."
+            ),
             finished_at=_utc_now_iso(),
         )
     except Exception as exc:
@@ -223,12 +232,33 @@ def get_plot_manifest():
     core_phase2 = _list_png_files(PHASE2_DIR / "plots", "/artifacts_phase2/plots")
     publication = _list_png_files(PHASE2_DIR / "plots_publication", "/artifacts_phase2/plots_publication")
     legacy = _list_png_files(PHASE1_DIR / "plots", "/artifacts_phase1/plots")
+    # Output of the dashboard's demo button, kept in its own group so it can never be
+    # mistaken for the committed study.
+    demo = _list_png_files(DEMO_DIR / "plots", "/artifacts_demo/plots") + _list_png_files(
+        DEMO_DIR / "plots_publication", "/artifacts_demo/plots_publication"
+    )
+
+    demo_config = None
+    demo_cfg_path = DEMO_DIR / "config_used.json"
+    if demo_cfg_path.exists():
+        try:
+            with open(demo_cfg_path, encoding="utf-8") as fp:
+                demo_config = json.load(fp)
+        except Exception:
+            demo_config = None
 
     return {
         "core": core_phase2,
         "publication": publication,
         "legacy": legacy,
-        "counts": {"core": len(core_phase2), "publication": len(publication), "legacy": len(legacy)},
+        "demo": demo,
+        "demo_config": demo_config,
+        "counts": {
+            "core": len(core_phase2),
+            "publication": len(publication),
+            "legacy": len(legacy),
+            "demo": len(demo),
+        },
     }
 
 
@@ -287,6 +317,7 @@ def get_research_status(job_id: str):
 
 app.mount("/artifacts_phase2", StaticFiles(directory=PHASE2_DIR), name="artifacts_phase2")
 app.mount("/artifacts_phase1", StaticFiles(directory=PHASE1_DIR), name="artifacts_phase1")
+app.mount("/artifacts_demo", StaticFiles(directory=DEMO_DIR), name="artifacts_demo")
 
 _load_jobs_from_disk()
 

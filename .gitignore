@@ -34,6 +34,11 @@ backend/outputs/benchmark_results.csv
 backend/outputs_phase2/research_jobs.json
 backend/outputs_phase2/*.tmp
 
+# Output of the dashboard's "Run Demo Benchmark" button. This is a reduced sweep
+# (2 seeds, 3 loads, horizon 120), not the study -- it exists so a demo click can never
+# overwrite the committed figures in outputs_phase2/. Nothing here is ever committed.
+backend/outputs_demo/
+
 # Build logs
 next_frontend/build_output.log
 next_frontend/build_output.txt

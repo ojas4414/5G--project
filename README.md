@@ -244,7 +244,7 @@ With both servers running, open **`http://localhost:3000`** in your browser.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  AETHER_OS           C_ADMM  MAAN  STATIC   [Run Full Research] [Result Plots] ● SIMULATION ACTIVE
+│  AETHER_OS           C_ADMM  MAAN  STATIC   [Run Demo Benchmark] [Result Plots] ● SIMULATION ACTIVE
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
 │           3D SPACE — Three glowing orbs orbit           │
@@ -288,10 +288,10 @@ This triggers the actual Python research engine to run a full experiment and gen
 
 ### From the Dashboard (Recommended)
 
-1. Click the **"Run Full Research"** button in the top navigation bar
+1. Click the **"Run Demo Benchmark"** button in the top navigation bar
 2. A green progress bar appears next to the button showing `0% → 100%`
 3. The status message below the nav updates in real-time (e.g. *"Completed 3/60: seed=0 load=1.0 alg=C_ADMM"*)
-4. When complete, the **Result Plots gallery** opens automatically
+4. When complete, the **Result Plots gallery** opens automatically on its **Demo Run** tab
 5. You can also click **"Result Plots"** at any time to view previously generated charts
 
 ### From the Terminal (Alternative)
@@ -403,10 +403,18 @@ Controlled by `ExpConfig` in `backend/src/experiments/run_benchmark_phase2.py`:
 | `n_mc_urlcc` | 64 | SAA samples for URLLC chance-constraint. Reduce to 16 for speed. |
 | `num_slices` | 3 | Number of network slices (eMBB + URLLC + mMTC). |
 
-The **"Run Full Research" button does not use these defaults.** It posts a much smaller
+The **"Run Demo Benchmark" button does not use these defaults.** It posts a much smaller
 job (2 seeds, 3 loads, horizon 120) sized to finish in a few minutes on a small shared-CPU
 instance; the accepted ranges are enforced by `ResearchRunRequest` in `backend/main.py`.
 `PLOT_DPI` (default 140) can be lowered further to cut memory during plotting.
+
+> **The demo button cannot overwrite the study.** It writes to `backend/outputs_demo/`
+> (gitignored, served at `/artifacts_demo`), never to `outputs_phase2/`. Its figures appear
+> under the gallery's amber **Demo Run** tab with a banner stating the reduced parameters.
+> This used to write straight into `outputs_phase2/`, so one click silently replaced the
+> committed 5-load publication figures with 3-load ones and nothing in the UI said so.
+> To regenerate the real study, run `python -m src.experiments.run_benchmark_phase2` from
+> a terminal — that is the only thing that writes `outputs_phase2/`.
 
 ### Frontend — Backend URL
 
@@ -493,7 +501,7 @@ Plots**: if charts appear, the frontend is genuinely talking to the backend.
 | Mode | When it's active | Data source |
 |------|-----------------|-------------|
 | **Simulation** (default) | Always — no backend needed | Browser generates fake sine-wave telemetry |
-| **Live** | After clicking "Run Full Research" | Backend serves real benchmark results |
+| **Live** | After clicking "Run Demo Benchmark" | Backend serves real benchmark results |
 
 In Simulation Mode, the 3D orbs and sparklines still animate — the utilisation values are mathematically generated in the browser using sine functions that respond to the sliders.
 
@@ -561,7 +569,7 @@ npm install --legacy-peer-deps
 
 ### Result Plots gallery is empty / shows nothing
 
-You need to run a benchmark first. The gallery only shows files that exist in `outputs_phase2/plots/`. Click **"Run Full Research"** in the nav bar and wait for it to complete.
+The committed study figures live in `outputs_phase2/plots/` and ship with the repo, so the **Core 14** and **Publication Pack** tabs should never be empty. An empty **Demo Run** tab just means you have not clicked **"Run Demo Benchmark"** yet.
 
 ---
 
@@ -643,7 +651,7 @@ cd backend                        cd next_frontend
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt   npm install
 python main.py          →         npm run dev        →        http://localhost:3000
-[API running]           →         [Site running]     →        Click "Run Full Research"
+[API running]           →         [Site running]     →        Click "Run Demo Benchmark"
 [Benchmark running...]                               ←        [Progress bar updates]
 [Done → plots saved]              ←                 ←        [Plot gallery opens]
 ```

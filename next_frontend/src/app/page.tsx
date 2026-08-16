@@ -184,7 +184,7 @@ const BeatUI = ({ beat, index, active, data, slices, setSlices, load, setLoad, o
                       </div>
                       {/* Ranges mirror the backend's ResearchRunRequest bounds
                           (num_slices 3-6, load_center 0.6-2.0). Allowing values outside
-                          them let "Run Full Research" fail validation with a 422. */}
+                          them let "Run Demo Benchmark" fail validation with a 422. */}
                       <input
                         type="range"
                         min={index === 1 ? 3 : 0.6}
@@ -195,9 +195,9 @@ const BeatUI = ({ beat, index, active, data, slices, setSlices, load, setLoad, o
                         style={{ color: beat.accent }}
                       />
                       <p className="text-[0.65rem] text-white/40 mt-3 leading-relaxed">
-                        {index === 1 
-                          ? "Higher slices = C_ADMM works harder to find consensus. Try sliding it to 10."
-                          : "Higher load triggers MAAN's neural overdrive (red cage around the model)."}
+                        {index === 1
+                          ? "More slices = more coupling constraints for C_ADMM to reach consensus on. Range is 3-6, matching the backend's limits."
+                          : "Higher load = heavier simulated demand, and the red cage around the model tightens. Animation only — it does not re-run the benchmark."}
                       </p>
                     </div>
                   </div>
@@ -260,6 +260,7 @@ export default function Home() {
   const { data, cAdmmSlices, setCAdmmSlices, maanLoad, setMaanLoad } = useNetworkData();
   const [plotGalleryOpen, setPlotGalleryOpen] = useState(false);
   const [plotsRefreshToken, setPlotsRefreshToken] = useState(0);
+  const [galleryTab, setGalleryTab] = useState<'core' | 'demo'>('core');
   const [researchJob, setResearchJob] = useState<ResearchJob | null>(null);
   const [researchStarting, setResearchStarting] = useState(false);
   const [researchError, setResearchError] = useState<string | null>(null);
@@ -350,6 +351,9 @@ export default function Home() {
         setResearchJob(job);
         if (job.status === 'completed') {
           setPlotsRefreshToken(v => v + 1);
+          // Land on the demo tab: this is the run the user just triggered, and it is
+          // labelled there so it cannot be confused with the committed study.
+          setGalleryTab('demo');
           setPlotGalleryOpen(true);
         }
       } catch {
@@ -408,12 +412,12 @@ export default function Home() {
             onClick={startFullResearch}
             disabled={researchStarting || researchJob?.status === 'running'}
             className="text-[0.62rem] tracking-[0.16em] uppercase border border-[#00FF88]/35 text-[#00FF88] hover:text-white hover:border-[#00FF88]/70 px-2.5 py-1 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            title="Runs a full benchmark sweep and regenerates plot artifacts"
+            title="Runs a reduced benchmark sweep (2 seeds x 3 loads x horizon 120) into a separate demo directory. The committed 6-seed x 5-load study figures are not touched."
           >
-            {researchJob?.status === 'running' ? 'Research Running' : researchStarting ? 'Starting...' : 'Run Full Research'}
+            {researchJob?.status === 'running' ? 'Demo Running' : researchStarting ? 'Starting...' : 'Run Demo Benchmark'}
           </button>
           <button
-            onClick={() => setPlotGalleryOpen(true)}
+            onClick={() => { setGalleryTab('core'); setPlotGalleryOpen(true); }}
             className="text-[0.62rem] tracking-[0.16em] uppercase border border-[#00E5FF]/35 text-[#00E5FF] hover:text-white hover:border-[#00E5FF]/70 px-2.5 py-1 rounded-md transition-colors"
           >
             Result Plots
@@ -449,7 +453,7 @@ export default function Home() {
             transition={{ duration: 2, repeat: Infinity }}
           />
           <span className="text-[0.65rem] tracking-[0.15em] text-white/50 uppercase">
-            {researchJob?.status === 'running' ? 'FULL RESEARCH MODE' : 'SIMULATION ACTIVE'}
+            {researchJob?.status === 'running' ? 'DEMO BENCHMARK RUNNING' : 'SIMULATION ACTIVE'}
           </span>
         </div>
       </header>
@@ -460,7 +464,7 @@ export default function Home() {
             {researchError && <div className="text-[#FF8A8A]">{researchError}</div>}
             {researchJob && (
               <div className="text-white/75">
-                <span className="font-semibold text-white/90">Full Research:</span>{' '}
+                <span className="font-semibold text-white/90">Demo Benchmark:</span>{' '}
                 {researchJob.message || 'Running...'}
               </div>
             )}
@@ -498,7 +502,7 @@ export default function Home() {
             setSlices={setCAdmmSlices}
             load={maanLoad}
             setLoad={setMaanLoad}
-            onOpenPlots={() => setPlotGalleryOpen(true)}
+            onOpenPlots={() => { setGalleryTab('core'); setPlotGalleryOpen(true); }}
           />
         ))}
       </div>
@@ -510,7 +514,7 @@ export default function Home() {
       >
         scroll to explore ↓
       </motion.div>
-      <PlotGalleryOverlay open={plotGalleryOpen} refreshToken={plotsRefreshToken} onClose={() => setPlotGalleryOpen(false)} />
+      <PlotGalleryOverlay open={plotGalleryOpen} refreshToken={plotsRefreshToken} initialTab={galleryTab} onClose={() => setPlotGalleryOpen(false)} />
     </main>
   );
 }
