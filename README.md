@@ -316,7 +316,7 @@ python -m src.experiments.run_benchmark_phase2
 |-----------|-------------|------|
 | **MAAN_PPO** | Neural network agent trained with PPO. Uses dual price signals to learn resource allocation. | Main algorithm under test |
 | **Ind. MAPPO_PPO** | Separate PPO agent per slice, no coordination or price signals | Ablation of the price mechanism |
-| **C_ADMM** | Consensus ADMM. Per-slice primal steps use closed-form gradients of the same utility the environment scores, then project onto the shared capacity constraints. | Distributed optimiser |
+| **C_ADMM** | Consensus ADMM. Per-slice primal steps use closed-form gradients of a **smooth relaxation** of the scored utility — the log-rate reward and the three M/M/1 delay terms — then project onto the shared capacity constraints. The relaxation omits the `γ·σ(·)` violation penalty (γ is not passed to the allocator at all) and ignores the `min(·, 3)` delay-cost saturation, so it is *not* the exact scored objective. | Distributed optimiser |
 | **Static Greedy** | Fixed proportional rules plus a greedy QoS repair loop; does not learn | Baseline floor |
 | **OGD_Bandit** | Projected online gradient ascent with one-point bandit feedback. No neural networks. | Black-box baseline |
 
@@ -341,15 +341,24 @@ QoS success ratio, lowest load → highest load:
 | OGD_Bandit | 0.350 → 0.310 |
 
 * All five algorithms degrade monotonically as offered load rises, as expected.
-* **C_ADMM leads** on both QoS success and utility, and beats MAAN_PPO significantly at
-  **all 5** load points (adjusted *p* ≤ 0.0003; utility margin +0.26 to +0.38). Having
-  exact gradients of the scored objective is a real advantage over learning it online.
+* **C_ADMM leads on utility and QoS success**, beating MAAN_PPO at **all 5** load points
+  on utility (Holm-adjusted *p* ≤ 0.0011; utility margin +0.26 to +0.38) and at all 5 on
+  QoS success (Holm-adjusted *p* ≤ 0.00034). This is **not** a clean sweep of the three
+  tested metrics: on **mean delay C_ADMM is significantly *worse*** than MAAN_PPO at every
+  load (Holm-adjusted *p* between 1.6e-04 and 5.3e-04). Working from closed-form gradients
+  of a smooth relaxation of the scored objective is a real advantage over learning it
+  online — but see the C_ADMM row above for what that relaxation leaves out.
 * **MAAN_PPO shows no significant advantage over the Independent MAPPO ablation** at any
-  load (adjusted *p* between 0.79 and 1.00; utility differences within +0.05). On this
-  benchmark the dual-price coordination mechanism is **not** demonstrably helping. That
-  is a negative result, and it is reported rather than tuned away.
-* Both PPO variants clearly beat Static_Greedy and OGD_Bandit at every load
-  (adjusted *p* ≤ 0.0014).
+  load, on any tested metric (Holm-adjusted *p* ≥ 0.26 for utility, ≥ 0.78 for QoS
+  success, ≥ 0.98 for mean delay; utility differences ≤ 0.053). On this benchmark the
+  dual-price coordination mechanism is **not** demonstrably helping. That is a negative
+  result, and it is reported rather than tuned away.
+* **MAAN_PPO** clearly beats Static_Greedy and OGD_Bandit at every load on all three
+  tested metrics (Holm-adjusted *p* ≤ 0.0015). **The Independent MAPPO ablation is not
+  covered by this statement.** `_significance_table` in `run_benchmark_phase2.py` only
+  ever tests algorithms against `target_alg="MAAN_PPO"`, so Ind-MAPPO vs Static_Greedy and
+  Ind-MAPPO vs OGD_Bandit were **never tested**. The summary means point the same way, but
+  that is directional only — not statistically confirmed.
 
 > These conclusions differ from earlier versions of this README, which described MAAN_PPO
 > as the winner. Those numbers came from a delay model whose units did not cancel: QoS

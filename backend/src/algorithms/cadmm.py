@@ -7,14 +7,25 @@ The slicing problem solved here is
                sum_s c_{s,m} <= C_m    for every MEC m
                sum_s tau_s   <= T_agg
 
-with the same per-slice utility the environment scores (concave log-rate reward minus
-delay cost). ADMM splits this into a per-slice primal step -- which sees only local
-information plus the consensus variable -- and a projection onto the coupling
-constraints, exchanged through scaled dual variables.
+where U_s is a *smooth relaxation* of the per-slice utility the environment scores.
+ADMM splits this into a per-slice primal step -- which sees only local information plus
+the consensus variable -- and a projection onto the coupling constraints, exchanged
+through scaled dual variables.
 
-The primal step performs a few projected-gradient iterations on the true local objective
-using closed-form derivatives of the M/M/1 delay model, so the algorithm optimises the
-objective it is scored against.
+The primal step performs a few projected-gradient iterations using closed-form (hand-
+derived) derivatives of the concave log-rate reward and the three M/M/1 delay terms.
+Those derivatives are exact for the terms they cover, and the marginal-rate model here
+reproduces the environment's SINR calculation, but the objective being differentiated is
+NOT the full scored one. Two terms of ``FiveGEnvironment._compute_utility`` are absent:
+
+* the ``gamma * sigmoid(20 * (D/d_max - 1))`` violation penalty -- ``gamma`` is not even
+  a constructor argument, so this allocator cannot see it. It is not small: gamma is
+  0.6 / 1.8 / 0.4 for eMBB / URLLC / mMTC, comparable to beta.
+* the ``DELAY_PENALTY_CAP`` saturation on the linear delay cost. Where the true scored
+  gradient is exactly zero (D > 3 * d_max), the gradient used here is still non-zero.
+
+The environment also rounds PRBs to integers; this solves the continuous relaxation.
+So: closed-form gradients, yes -- gradients of the exact scored objective, no.
 """
 
 from __future__ import annotations

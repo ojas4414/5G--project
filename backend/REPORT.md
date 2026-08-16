@@ -48,7 +48,9 @@ module docstring in `src/environment/fiveg_env.py`), so the mean sojourn time
   requests fewer PRBs keeps them idle and `radio_util` becomes an informative metric.
 - `C_ADMM` normalised the capacity vector rather than the demand vector, requesting ~1 PRB
   out of 160; its primal step also carried no objective gradient. It now uses closed-form
-  derivatives of the scored utility.
+  derivatives of a smooth relaxation of the scored utility — the log-rate reward and the
+  three M/M/1 delay terms. The `gamma` violation penalty and the delay-cost saturation are
+  not differentiated (see the `cadmm.py` module docstring).
 - Jain's index is computed on rates, not on signed utilities.
 - Confidence intervals use Student's *t*; comparisons use paired *t*-tests with
   Holm-Bonferroni correction, matching the common-random-numbers design.
